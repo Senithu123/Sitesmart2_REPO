@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "610693690403",
+    "project_id": "site-smart-2",
+    "storage_bucket": "site-smart-2.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:610693690403:android:0d26de199aee716719ad96",
+        "android_client_info": {
+          "package_name": "Site_Smart.com"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCDrlXjNs3MiX-qWZ0TL4UwiaqThTJDo84"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
