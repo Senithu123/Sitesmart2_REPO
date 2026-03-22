@@ -424,6 +424,7 @@ class _BillsPageState extends State<BillsPage> {
                                 padding: const EdgeInsets.only(bottom: 10),
                                 child: _InvoiceCard(
                                   title: (bill['title'] ?? 'Invoice').toString(),
+                                  description: (bill['description'] ?? '').toString(),
                                   amount: _formatCurrency((bill['amount'] ?? 0) as num),
                                   projectName: (bill['projectName'] ?? 'Project').toString(),
                                   paidDate: _formatShortDate(bill['paidDate'] as Timestamp?),
@@ -597,6 +598,7 @@ class _StatCard extends StatelessWidget {
 
 class _InvoiceCard extends StatelessWidget {
   final String title;
+  final String description;
   final String amount;
   final String projectName;
   final String paidDate;
@@ -604,6 +606,7 @@ class _InvoiceCard extends StatelessWidget {
 
   const _InvoiceCard({
     required this.title,
+    required this.description,
     required this.amount,
     required this.projectName,
     required this.paidDate,
@@ -640,6 +643,10 @@ class _InvoiceCard extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(amount, style: const TextStyle(fontSize: 14)),
+          if (description.trim().isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text('Money for: $description', style: const TextStyle(fontSize: 14)),
+          ],
           const SizedBox(height: 2),
           Text(projectName, style: const TextStyle(fontSize: 14)),
           const SizedBox(height: 2),

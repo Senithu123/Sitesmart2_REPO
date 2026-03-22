@@ -6,7 +6,16 @@
       "request": "launch",
       "type": "dart",
       "toolArgs": [
-        "--no-dds"
+        "--no-dds",
+        "--dart-define=STRIPE_PUBLISHABLE_KEY=pk_test_51T49ZJI0IQLrfvmSbgXFoOmGDOed6cp02VP16uIsGRoyEagkuuRD0Aui3rUoRR64rSEaTZlNJRYLDT1ZWKiCJ3t000UOQTIQQR"
+      ]
+    },
+    {
+      "name": "Flutter with Stripe",
+      "request": "launch",
+      "type": "dart",
+      "toolArgs": [
+        "--dart-define=STRIPE_PUBLISHABLE_KEY=pk_test_51T49ZJI0IQLrfvmSbgXFoOmGDOed6cp02VP16uIsGRoyEagkuuRD0Aui3rUoRR64rSEaTZlNJRYLDT1ZWKiCJ3t000UOQTIQQR"
       ]
     }
   ]

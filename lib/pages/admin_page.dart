@@ -7,16 +7,17 @@ import 'login_page.dart';
 class AdminPage extends StatefulWidget {
   final int initialIndex;
 
-  const AdminPage({super.key, this.initialIndex = 2});
+  const AdminPage({super.key, this.initialIndex = 0});
 
   @override
   State<AdminPage> createState() => _AdminPageState();
 }
 
 class _AdminPageState extends State<AdminPage> {
-  int selectedIndex = 2;
+  int selectedIndex = 0;
   bool isLoggingOut = false;
   String? _processingBookingId;
+  String? _processingPaymentBookingId;
   String? _processingUserId;
   static const List<String> _roles = ['Client', 'Contractor', 'Architect', 'Admin'];
 
@@ -90,8 +91,6 @@ class _AdminPageState extends State<AdminPage> {
   Future<void> _giveAccess(String bookingId) async {
     if (_processingBookingId == bookingId) return;
 
-    const firstBill = _FirstBillInput(title: 'Foundation', amount: 150000);
-
     if (!mounted) return;
     setState(() {
       _processingBookingId = bookingId;
@@ -102,14 +101,12 @@ class _AdminPageState extends State<AdminPage> {
       final bookingRef = firestore.collection("bookings").doc(bookingId);
       final bookingSnap = await bookingRef.get();
       final bookingData = bookingSnap.data() ?? <String, dynamic>{};
-      final projectRef = firestore.collection('projects').doc(bookingId);
-      var contractorUid = (bookingData['contractorUid'] ?? '').toString().trim();
-      if (contractorUid.isEmpty) {
-        contractorUid = await _resolveDefaultContractorUid(
-          firestore,
-          contractorEmail: (bookingData['contractorEmail'] ?? '').toString(),
-        );
-      }
+      final projectRef = await _ensureProjectForBooking(
+        firestore,
+        bookingId: bookingId,
+        bookingData: bookingData,
+        startProject: true,
+      );
 
       // Admin action: confirm payment and unlock client project interface.
       await bookingRef.update({
@@ -117,24 +114,10 @@ class _AdminPageState extends State<AdminPage> {
         "accessGranted": true,
         "status": "Access Granted",
         "accessGrantedAt": FieldValue.serverTimestamp(),
-        "contractorUid": contractorUid,
+        "contractorUid": (bookingData['contractorUid'] ?? '').toString().trim(),
       });
 
-      await projectRef.set({
-        'bookingId': bookingId,
-        'houseTitle': (bookingData['houseTitle'] ?? 'Family House').toString(),
-        'priceText': (bookingData['priceText'] ?? '').toString(),
-        'location': (bookingData['location'] ?? 'Malabe').toString(),
-        'clientEmail': (bookingData['userEmail'] ?? '').toString(),
-        'clientUid': (bookingData['userId'] ?? '').toString(),
-        'contractorUid': contractorUid,
-        'startedConstruction': true,
-        'startedAt': FieldValue.serverTimestamp(),
-        'status': 'In Progress',
-        'updatedAt': FieldValue.serverTimestamp(),
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-
+      const firstBill = _FirstBillInput(title: 'Foundation', amount: 150000);
       await projectRef.collection('bills').doc('initial_payment').set(
         {
           'title': firstBill.title,
@@ -142,10 +125,12 @@ class _AdminPageState extends State<AdminPage> {
           'status': 'Paid',
           'projectName': (bookingData['houseTitle'] ?? 'Project').toString(),
           'clientEmail': (bookingData['userEmail'] ?? '').toString(),
+          'description': 'Initial foundation payment',
           'createdAt': FieldValue.serverTimestamp(),
           'paidDate': FieldValue.serverTimestamp(),
           'source': 'admin_approval',
         },
+        SetOptions(merge: true),
       );
 
       for (final phase in _defaultTimelinePhases) {
@@ -180,6 +165,188 @@ class _AdminPageState extends State<AdminPage> {
         });
       }
     }
+  }
+
+  Future<DocumentReference<Map<String, dynamic>>> _ensureProjectForBooking(
+    FirebaseFirestore firestore, {
+    required String bookingId,
+    required Map<String, dynamic> bookingData,
+    bool startProject = false,
+  }) async {
+    final projectRef = firestore.collection('projects').doc(bookingId);
+    final projectSnap = await projectRef.get();
+    var contractorUid = (bookingData['contractorUid'] ?? '').toString().trim();
+    if (contractorUid.isEmpty) {
+      contractorUid = await _resolveDefaultContractorUid(
+        firestore,
+        contractorEmail: (bookingData['contractorEmail'] ?? '').toString(),
+      );
+    }
+    bookingData['contractorUid'] = contractorUid;
+
+    final payload = <String, dynamic>{
+      'bookingId': bookingId,
+      'houseTitle': (bookingData['houseTitle'] ?? 'Family House').toString(),
+      'priceText': (bookingData['priceText'] ?? '').toString(),
+      'location': (bookingData['location'] ?? 'Malabe').toString(),
+      'clientEmail': (bookingData['userEmail'] ?? '').toString(),
+      'clientUid': (bookingData['userId'] ?? '').toString(),
+      'contractorUid': contractorUid,
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+
+    if (!projectSnap.exists) {
+      payload['createdAt'] = FieldValue.serverTimestamp();
+    }
+
+    if (startProject) {
+      payload['startedConstruction'] = true;
+      payload['status'] = 'In Progress';
+      if (!projectSnap.exists) {
+        payload['startedAt'] = FieldValue.serverTimestamp();
+      }
+    }
+
+    await projectRef.set(payload, SetOptions(merge: true));
+    return projectRef;
+  }
+
+  Future<void> _recordAppointmentPayment(
+    String bookingId,
+    Map<String, dynamic> bookingData,
+  ) async {
+    if (_processingPaymentBookingId == bookingId) return;
+
+    final result = await _showAppointmentPaymentDialog(
+      initialAmount: bookingData['visitPaymentAmount']?.toString() ?? '',
+      initialPurpose: (bookingData['visitPaymentPurpose'] ?? '').toString(),
+    );
+    if (result == null) return;
+
+    if (!mounted) return;
+    setState(() => _processingPaymentBookingId = bookingId);
+
+    try {
+      final firestore = FirebaseFirestore.instance;
+      final bookingRef = firestore.collection('bookings').doc(bookingId);
+      final projectRef = await _ensureProjectForBooking(
+        firestore,
+        bookingId: bookingId,
+        bookingData: bookingData,
+      );
+
+      final billId = 'appointment_payment_${DateTime.now().millisecondsSinceEpoch}';
+      await bookingRef.set({
+        'visitPaymentAmount': result.amount,
+        'visitPaymentPurpose': result.purpose,
+        'visitPaymentStatus': 'Paid',
+        'visitPaymentUpdatedAt': FieldValue.serverTimestamp(),
+        'lastBillId': billId,
+      }, SetOptions(merge: true));
+
+      await projectRef.collection('bills').doc(billId).set({
+        'title': 'Appointment Visit Payment',
+        'amount': result.amount,
+        'status': 'Paid',
+        'projectName': (bookingData['houseTitle'] ?? 'Project').toString(),
+        'clientEmail': (bookingData['userEmail'] ?? '').toString(),
+        'description': result.purpose,
+        'billType': 'appointment_payment',
+        'bookingId': bookingId,
+        'createdAt': FieldValue.serverTimestamp(),
+        'paidDate': FieldValue.serverTimestamp(),
+        'source': 'appointment_visit',
+      });
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Visit payment saved and added to bills')),
+      );
+    } on FirebaseException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to save visit payment: ${e.message ?? e.code}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to save visit payment: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _processingPaymentBookingId = null);
+      }
+    }
+  }
+
+  Future<_AppointmentPaymentResult?> _showAppointmentPaymentDialog({
+    String initialAmount = '',
+    String initialPurpose = '',
+  }) async {
+    final amountCtrl = TextEditingController(text: initialAmount);
+    final purposeCtrl = TextEditingController(text: initialPurpose);
+    String? errorText;
+
+    return showDialog<_AppointmentPaymentResult>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
+          title: const Text('Record Visit Payment'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: amountCtrl,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(
+                  labelText: 'Amount Paid',
+                  hintText: 'e.g. 50000',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: purposeCtrl,
+                minLines: 2,
+                maxLines: 4,
+                decoration: const InputDecoration(
+                  labelText: 'Money For',
+                  hintText: 'e.g. Site visit consultation, design revision fee',
+                ),
+              ),
+              if (errorText != null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  errorText!,
+                  style: const TextStyle(color: Colors.red, fontSize: 12),
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () {
+                final normalizedAmount = amountCtrl.text.trim().replaceAll(',', '');
+                final amount = num.tryParse(normalizedAmount) ?? 0;
+                final purpose = purposeCtrl.text.trim();
+                if (amount <= 0 || purpose.isEmpty) {
+                  setLocal(() {
+                    errorText = 'Enter a valid amount and what the money was for.';
+                  });
+                  return;
+                }
+
+                Navigator.pop(
+                  context,
+                  _AppointmentPaymentResult(amount: amount, purpose: purpose),
+                );
+              },
+              child: const Text('Save Payment'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<String> _resolveDefaultContractorUid(
@@ -383,7 +550,208 @@ class _AdminPageState extends State<AdminPage> {
     Widget content = const SizedBox();
 
     if (selectedIndex == 0) {
-      content = const SizedBox.shrink();
+      content = StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: FirebaseFirestore.instance.collection('users').snapshots(),
+        builder: (context, usersSnapshot) {
+          return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: FirebaseFirestore.instance.collection('bookings').snapshots(),
+            builder: (context, bookingsSnapshot) {
+              return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                stream: FirebaseFirestore.instance.collection('projects').snapshots(),
+                builder: (context, projectsSnapshot) {
+                  if (usersSnapshot.hasError ||
+                      bookingsSnapshot.hasError ||
+                      projectsSnapshot.hasError) {
+                    return const Center(
+                      child: Text('Unable to load the admin overview right now'),
+                    );
+                  }
+
+                  final isLoading =
+                      usersSnapshot.connectionState == ConnectionState.waiting ||
+                      bookingsSnapshot.connectionState == ConnectionState.waiting ||
+                      projectsSnapshot.connectionState == ConnectionState.waiting;
+
+                  if (isLoading) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+
+                  final userDocs = usersSnapshot.data?.docs ?? [];
+                  final bookingDocs = bookingsSnapshot.data?.docs ?? [];
+                  final projectDocs = projectsSnapshot.data?.docs ?? [];
+
+                  final pendingBookings = bookingDocs
+                      .where((doc) => doc.data()['accessGranted'] != true)
+                      .length;
+                  final approvedBookings = bookingDocs.length - pendingBookings;
+                  final activeProjects = projectDocs
+                      .where(
+                        (doc) =>
+                            (doc.data()['status'] ?? '').toString().toLowerCase() !=
+                            'completed',
+                      )
+                      .length;
+                  final contractors = userDocs
+                      .where(
+                        (doc) =>
+                            (doc.data()['role'] ?? '').toString().trim() ==
+                            'Contractor',
+                      )
+                      .length;
+
+                  final recentBookings = bookingDocs.toList()
+                    ..sort((a, b) {
+                      final aDate = (a.data()['createdAt'] as Timestamp?)?.toDate() ??
+                          DateTime.fromMillisecondsSinceEpoch(0);
+                      final bDate = (b.data()['createdAt'] as Timestamp?)?.toDate() ??
+                          DateTime.fromMillisecondsSinceEpoch(0);
+                      return bDate.compareTo(aDate);
+                    });
+
+                  return SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(18),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(color: Colors.black12),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Admin Dashboard',
+                                style: TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w700,
+                                  color: Color(0xFF1F2937),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                pendingBookings > 0
+                                    ? '$pendingBookings booking requests still need your attention today.'
+                                    : 'Everything looks calm right now. Your main admin tasks are under control.',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  height: 1.5,
+                                  color: Colors.blueGrey.shade700,
+                                ),
+                              ),
+                              const SizedBox(height: 14),
+                              Wrap(
+                                spacing: 10,
+                                runSpacing: 10,
+                                children: [
+                                  _overviewChip(
+                                    icon: Icons.pending_actions_outlined,
+                                    label: 'Pending approvals',
+                                    value: '$pendingBookings',
+                                    color: const Color(0xFFB45309),
+                                  ),
+                                  _overviewChip(
+                                    icon: Icons.fact_check_outlined,
+                                    label: 'Approved bookings',
+                                    value: '$approvedBookings',
+                                    color: const Color(0xFF0F766E),
+                                  ),
+                                  _overviewChip(
+                                    icon: Icons.home_repair_service_outlined,
+                                    label: 'Active projects',
+                                    value: '$activeProjects',
+                                    color: const Color(0xFF1D4ED8),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _infoPanel(
+                                title: 'Platform Status',
+                                subtitle:
+                                    'A simple summary of the current admin workload.',
+                                child: Column(
+                                  children: [
+                                    _metricRow('Total users', '${userDocs.length}'),
+                                    _metricRow('Contractors available', '$contractors'),
+                                    _metricRow('Total bookings', '${bookingDocs.length}'),
+                                    _metricRow('Projects created', '${projectDocs.length}'),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 14),
+                        _infoPanel(
+                          title: 'Recent Requests',
+                          subtitle:
+                              'The latest bookings appear here for quick review.',
+                          child: recentBookings.isEmpty
+                              ? Text(
+                                  'No booking requests are available yet.',
+                                  style: TextStyle(color: Colors.blueGrey.shade700),
+                                )
+                              : Column(
+                                  children: recentBookings.take(3).map((doc) {
+                                    final data = doc.data();
+                                    final createdAt =
+                                        (data['createdAt'] as Timestamp?)?.toDate();
+                                    final isApproved = data['accessGranted'] == true;
+                                    return Container(
+                                      width: double.infinity,
+                                      margin: const EdgeInsets.only(bottom: 10),
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFF7F9FC),
+                                        borderRadius: BorderRadius.circular(14),
+                                      ),
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            (data['customerName'] ?? 'Customer').toString(),
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.w700,
+                                              color: Color(0xFF1F2937),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            'House: ${(data['houseTitle'] ?? '-').toString()}',
+                                            style: TextStyle(color: Colors.blueGrey.shade700),
+                                          ),
+                                          Text(
+                                            'Status: ${isApproved ? 'Access granted' : 'Waiting for approval'}',
+                                            style: TextStyle(color: Colors.blueGrey.shade700),
+                                          ),
+                                          Text(
+                                            'Created: ${_formatShortDate(createdAt)}',
+                                            style: TextStyle(color: Colors.blueGrey.shade700),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  }).toList(),
+                                ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              );
+            },
+          );
+        },
+      );
     } else if (selectedIndex == 1) {
       content = Column(
         children: [
@@ -517,12 +885,19 @@ class _AdminPageState extends State<AdminPage> {
               Map<String, dynamic> data = docs[index].data() as Map<String, dynamic>;
               bool accessGranted = data["accessGranted"] == true;
               final bool isProcessing = _processingBookingId == docs[index].id;
+              final bool isSavingPayment = _processingPaymentBookingId == docs[index].id;
               Timestamp? dateTs = data["appointmentDate"] as Timestamp?;
               String dateText = "No date";
               if (dateTs != null) {
                 DateTime d = dateTs.toDate();
-                dateText = "${d.day}-${d.month}-${d.year}";
+                final hour = d.hour == 0 ? 12 : (d.hour > 12 ? d.hour - 12 : d.hour);
+                final minute = d.minute.toString().padLeft(2, '0');
+                final ampm = d.hour >= 12 ? 'PM' : 'AM';
+                dateText = "${d.day}-${d.month}-${d.year} $hour:$minute $ampm";
               }
+              final visitPaymentAmount = data['visitPaymentAmount'];
+              final visitPaymentPurpose = (data['visitPaymentPurpose'] ?? '').toString().trim();
+              final visitPaymentStatus = (data['visitPaymentStatus'] ?? 'Not added').toString();
 
               return Container(
                 margin: const EdgeInsets.only(bottom: 12),
@@ -539,11 +914,91 @@ class _AdminPageState extends State<AdminPage> {
                       data["customerName"]?.toString() ?? "Customer",
                       style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
                     ),
-                    const SizedBox(height: 4),
-                    Text("House: ${data["houseTitle"] ?? "-"}"),
-                    Text("Phone: ${data["phone"] ?? "-"}"),
-                    Text("Appointment Date: $dateText"),
-                    Text("Status: ${data["status"] ?? "Pending Approval"}"),
+                    const SizedBox(height: 10),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF7F9FC),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Appointment Details',
+                            style: TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(height: 6),
+                          Text("House: ${data["houseTitle"] ?? "-"}"),
+                          Text("Phone: ${data["phone"] ?? "-"}"),
+                          Text("Appointment Date: $dateText"),
+                          Text("Status: ${data["status"] ?? "Pending Approval"}"),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF8FAF1),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFFE2E8C8)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Visit Payment',
+                            style: TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            visitPaymentAmount == null
+                                ? 'Amount Paid: Not recorded'
+                                : 'Amount Paid: Rs.${visitPaymentAmount.toString()}',
+                          ),
+                          Text(
+                            visitPaymentPurpose.isEmpty
+                                ? 'Money For: Not recorded'
+                                : 'Money For: $visitPaymentPurpose',
+                          ),
+                          Text('Payment Status: $visitPaymentStatus'),
+                          const SizedBox(height: 10),
+                          SizedBox(
+                            width: double.infinity,
+                            child: OutlinedButton.icon(
+                              onPressed: accessGranted && !isSavingPayment
+                                  ? () => _recordAppointmentPayment(docs[index].id, data)
+                                  : null,
+                              icon: isSavingPayment
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(strokeWidth: 2),
+                                    )
+                                  : const Icon(Icons.payments_outlined),
+                              label: Text(
+                                isSavingPayment
+                                    ? 'Saving Payment...'
+                                    : (visitPaymentAmount == null
+                                        ? 'Add Visit Payment'
+                                        : 'Update Visit Payment'),
+                              ),
+                            ),
+                          ),
+                          if (!accessGranted)
+                            const Padding(
+                              padding: EdgeInsets.only(top: 8),
+                              child: Text(
+                                'Grant access first to create the project bill for this appointment.',
+                                style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
                     const SizedBox(height: 10),
                     if (!accessGranted)
                       // Approve request and give access to customer.
@@ -597,26 +1052,7 @@ class _AdminPageState extends State<AdminPage> {
         },
       );
     } else {
-      content = Center(
-        child: SizedBox(
-          width: 220,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ElevatedButton.icon(
-                onPressed: isLoggingOut ? null : _logout,
-                icon: const Icon(Icons.logout),
-                label: Text(isLoggingOut ? 'Logging out...' : 'Logout'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red,
-                  foregroundColor: Colors.white,
-                  minimumSize: const Size(double.infinity, 45),
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
+      content = const SizedBox.shrink();
     }
 
     return Scaffold(
@@ -671,6 +1107,14 @@ class _AdminPageState extends State<AdminPage> {
         backgroundColor: const Color(0xFFDADADA),
         type: BottomNavigationBarType.fixed,
         onTap: (index) {
+          if (index == 3) {
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const ProfilePage()),
+            );
+            return;
+          }
+
           setState(() {
             selectedIndex = index;
           });
@@ -685,17 +1129,114 @@ class _AdminPageState extends State<AdminPage> {
     );
   }
 
-  Widget _card(String text) {
+  Widget _overviewChip({
+    required IconData icon,
+    required String label,
+    required String value,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 18),
+          const SizedBox(width: 8),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                value,
+                style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 14,
+                  color: color,
+                ),
+              ),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: color.withOpacity(0.85),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _infoPanel({
+    required String title,
+    required String subtitle,
+    required Widget child,
+  }) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(18),
         border: Border.all(color: Colors.black12),
       ),
-      child: Text(text),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF1F2937),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            subtitle,
+            style: TextStyle(
+              fontSize: 13,
+              height: 1.45,
+              color: Colors.blueGrey.shade700,
+            ),
+          ),
+          const SizedBox(height: 14),
+          child,
+        ],
+      ),
     );
+  }
+
+  Widget _metricRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(color: Colors.blueGrey.shade700),
+            ),
+          ),
+          Text(
+            value,
+            style: const TextStyle(
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF1F2937),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatShortDate(DateTime? date) {
+    if (date == null) return '-';
+    return '${date.day}/${date.month}/${date.year}';
   }
 }
 
@@ -718,5 +1259,15 @@ class _UserFormResult {
     required this.fullName,
     required this.email,
     required this.role,
+  });
+}
+
+class _AppointmentPaymentResult {
+  final num amount;
+  final String purpose;
+
+  const _AppointmentPaymentResult({
+    required this.amount,
+    required this.purpose,
   });
 }

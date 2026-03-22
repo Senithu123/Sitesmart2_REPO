@@ -2,12 +2,20 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
+import 'dart:io';
+
+import 'package:flutter/foundation.dart' show kIsWeb;
+
+import '../data/default_house_listings.dart';
+import '../models/house_listing.dart';
+import '../services/vr_payment_service.dart';
+import 'booking_confirmation_page.dart';
 import 'bills_page.dart';
-import 'booking_form_page.dart';
 import 'profile_page.dart';
 import 'timeline_page.dart';
 import 'home_page.dart';
 import 'project_waiting_page.dart';
+import 'vr_view.dart';
 
 class ClientProjectPage extends StatefulWidget {
   const ClientProjectPage({super.key});
@@ -21,7 +29,12 @@ class _ClientProjectPageState extends State<ClientProjectPage> {
   String _userName = 'User';
   String _projectTitle = 'Modern Family House';
   String _projectStatus = 'In Progress';
+  String _projectLocation = '-';
   DateTime? _projectStartedAt;
+  DateTime? _meetingDate;
+  String? _approvedBookingId;
+  HouseListing? _projectListing;
+  bool _isVrAccessBusy = false;
 
   final List<_TeamMember> _teamMembers = const [
     _TeamMember(
@@ -197,13 +210,24 @@ class _ClientProjectPageState extends State<ClientProjectPage> {
           _extractApprovalDate(approvedData) ??
           _parseAnyDate(approvedData['appointmentDate']) ??
           _parseAnyDate(approvedData['createdAt']);
+      final meetingDate =
+          _parseAnyDate(approvedData['appointmentDate']) ??
+          _parseAnyDate(latest['appointmentDate']);
+      final resolvedTitle =
+          (approvedData['houseTitle'] ?? latest['houseTitle']).toString().trim();
+      final resolvedListing = await _resolveHouseListing(title: resolvedTitle);
+      final resolvedLocation = (projectDoc.data()?['location'] ??
+              approvedData['location'] ??
+              latest['location'] ??
+              resolvedListing?.location ??
+              '-')
+          .toString()
+          .trim();
 
       if (!mounted) return;
       setState(() {
-        final title =
-            (approvedData['houseTitle'] ?? latest['houseTitle']).toString().trim();
-        if (title.isNotEmpty) {
-          _projectTitle = title;
+        if (resolvedTitle.isNotEmpty) {
+          _projectTitle = resolvedTitle;
         }
 
         final status =
@@ -211,11 +235,72 @@ class _ClientProjectPageState extends State<ClientProjectPage> {
         if (status.isNotEmpty) {
           _projectStatus = status;
         }
+        _projectLocation = resolvedLocation.isEmpty ? '-' : resolvedLocation;
         _projectStartedAt = startedDate;
+        _meetingDate = meetingDate;
+        _approvedBookingId = approvedBookingId;
+        _projectListing = resolvedListing;
       });
     } catch (_) {
       // Keep UI defaults when data is unavailable.
     }
+  }
+
+  Future<HouseListing?> _resolveHouseListing({
+    required String title,
+  }) async {
+    final normalizedTitle = title.trim().toLowerCase();
+    if (normalizedTitle.isEmpty) return null;
+
+    HouseListing? defaultFallbackForTitle() {
+      if (normalizedTitle.contains('lakeside') || normalizedTitle.contains('retreat')) {
+        return defaultHouseListings.firstWhere(
+          (listing) => listing.id == 'default-house-1',
+        );
+      }
+      if (normalizedTitle.contains('cliffside') || normalizedTitle.contains('pool house')) {
+        return defaultHouseListings.firstWhere(
+          (listing) => listing.id == 'default-house-2',
+        );
+      }
+      if (normalizedTitle.contains('hillside') || normalizedTitle.contains('glass residence')) {
+        return defaultHouseListings.firstWhere(
+          (listing) => listing.id == 'default-house-3',
+        );
+      }
+      if (normalizedTitle.contains('urban') || normalizedTitle.contains('smart residence')) {
+        return defaultHouseListings.firstWhere(
+          (listing) => listing.id == 'default-house-4',
+        );
+      }
+      return null;
+    }
+
+    bool matches(String candidate) {
+      final normalizedCandidate = candidate.trim().toLowerCase();
+      if (normalizedCandidate.isEmpty) return false;
+      return normalizedCandidate == normalizedTitle ||
+          normalizedCandidate.contains(normalizedTitle) ||
+          normalizedTitle.contains(normalizedCandidate);
+    }
+
+    try {
+      final snap = await FirebaseFirestore.instance.collection('houses').get();
+      for (final doc in snap.docs) {
+        final listing = HouseListing.fromMap(doc.id, doc.data());
+        if (matches(listing.houseName)) {
+          return listing;
+        }
+      }
+    } catch (_) {}
+
+    for (final listing in defaultHouseListings) {
+      if (matches(listing.houseName)) {
+        return listing;
+      }
+    }
+
+    return defaultFallbackForTitle();
   }
 
   void _redirectToClientHome() {
@@ -301,10 +386,139 @@ class _ClientProjectPageState extends State<ClientProjectPage> {
     return '${date.day} ${months[date.month - 1]} ${date.year}';
   }
 
-  void _showComingSoon(String feature) {
+  void _showSnackBar(String message) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('$feature page coming soon')),
+      SnackBar(content: Text(message)),
     );
+  }
+
+  void _openBookingConfirmation() {
+    Navigator.push(
+      context,
+        MaterialPageRoute(
+          builder: (_) => BookingConfirmationPage(
+            bookingId: _approvedBookingId,
+            meetingDate: _meetingDate,
+            houseTitle: _projectTitle,
+          ),
+      ),
+    );
+  }
+
+  Future<void> _openProjectVr() async {
+    final listing = _projectListing;
+    if (listing == null || listing.vrUrl.trim().isEmpty) {
+      _showSnackBar('VR view is not available for this project yet.');
+      return;
+    }
+    if (_isVrAccessBusy) return;
+
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) {
+      _showSnackBar('Please sign in to unlock VR access.');
+      return;
+    }
+
+    setState(() {
+      _isVrAccessBusy = true;
+    });
+
+    try {
+      final hasAccess = await VrPaymentService.hasVrAccess(
+        houseTitle: listing.houseName,
+      );
+      if (!mounted) return;
+
+      if (hasAccess) {
+        _navigateToProjectVr(listing);
+        return;
+      }
+
+      if (!VrPaymentService.supportsNativeVrPayments) {
+        _showSnackBar(VrPaymentService.unsupportedPlatformMessage);
+        return;
+      }
+
+      final shouldContinue = await _showVrPaymentDialog(listing.houseName);
+      if (!mounted || !shouldContinue) return;
+
+      await VrPaymentService.payForVrAccess(
+        houseTitle: listing.houseName,
+        customerName: _resolveCustomerName(currentUser),
+        email: currentUser.email ?? '',
+      );
+      if (!mounted) return;
+
+      _showSnackBar('Payment successful. VR access unlocked.');
+      _navigateToProjectVr(listing);
+    } catch (error) {
+      if (!mounted) return;
+      _showSnackBar(VrPaymentService.describeError(error));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isVrAccessBusy = false;
+        });
+      }
+    }
+  }
+
+  void _navigateToProjectVr(HouseListing listing) {
+    final imagePath = listing.galleryPaths.isNotEmpty
+        ? listing.galleryPaths.first
+        : (listing.imagePath.trim().isNotEmpty ? listing.imagePath : '');
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => VrViewPage(
+          title: listing.houseName,
+          imagePath: imagePath,
+          vrUrl: listing.vrUrl,
+        ),
+      ),
+    );
+  }
+
+  String _resolveCustomerName(User user) {
+    final candidate = _userName.trim();
+    if (candidate.isNotEmpty && candidate.toLowerCase() != 'user') {
+      return candidate;
+    }
+
+    final displayName = user.displayName?.trim() ?? '';
+    if (displayName.isNotEmpty) {
+      return displayName;
+    }
+
+    final emailPrefix = user.email?.split('@').first.trim() ?? '';
+    return emailPrefix.isEmpty ? 'Site Smart Customer' : emailPrefix;
+  }
+
+  Future<bool> _showVrPaymentDialog(String houseTitle) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: const Text('Unlock VR Tour'),
+        content: Text(
+          '$houseTitle requires a one-time ${VrPaymentService.vrPriceLabel} Stripe payment to unlock all VR tours on this account.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text('Pay ${VrPaymentService.vrPriceLabel}'),
+          ),
+        ],
+      ),
+    );
+
+    return result ?? false;
   }
 
   void _showTeamMemberDetails(_TeamMember member) {
@@ -354,6 +568,8 @@ class _ClientProjectPageState extends State<ClientProjectPage> {
                   const SizedBox(height: 10),
                   _ProjectCard(
                     title: _projectTitle,
+                    listing: _projectListing,
+                    location: _projectLocation,
                     startedText: _formatStartedDate(_projectStartedAt),
                     statusText: _projectStatus,
                     onTap: _openTimeline,
@@ -367,17 +583,7 @@ class _ClientProjectPageState extends State<ClientProjectPage> {
                         child: _QuickAction(
                           icon: Icons.calendar_today_outlined,
                           title: 'Booking',
-                          onTap: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => BookingFormPage(
-                                  houseTitle: _projectTitle,
-                                  priceText: '',
-                                ),
-                              ),
-                            );
-                          },
+                          onTap: _openBookingConfirmation,
                         ),
                       ),
                       const Spacer(),
@@ -406,7 +612,10 @@ class _ClientProjectPageState extends State<ClientProjectPage> {
                     },
                   ),
                   const SizedBox(height: 16),
-                  _HotlineCard(onTapVrew: () => _showComingSoon('Vrew')),
+                  _HotlineCard(
+                    onTapVrew: _isVrAccessBusy ? null : _openProjectVr,
+                    isBusy: _isVrAccessBusy,
+                  ),
                 ],
               ),
             ),
@@ -548,16 +757,75 @@ class _SectionTitle extends StatelessWidget {
 
 class _ProjectCard extends StatelessWidget {
   final String title;
+  final HouseListing? listing;
+  final String location;
   final String startedText;
   final String statusText;
   final VoidCallback onTap;
 
   const _ProjectCard({
     required this.title,
+    required this.listing,
+    required this.location,
     required this.startedText,
     required this.statusText,
     required this.onTap,
   });
+
+  Widget _buildProjectImage() {
+    if (listing != null) {
+      if (listing!.galleryPaths.isNotEmpty) {
+        final path = listing!.galleryPaths.first;
+        if (kIsWeb) {
+          return Image.network(
+            path,
+            width: 128,
+            height: 108,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => _imageFallback(),
+          );
+        }
+        return Image.file(
+          File(path),
+          width: 128,
+          height: 108,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _imageFallback(),
+        );
+      }
+
+      if (listing!.imageUrl.trim().isNotEmpty) {
+        return Image.network(
+          listing!.imageUrl,
+          width: 128,
+          height: 108,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _imageFallback(),
+        );
+      }
+
+      if (listing!.imagePath.trim().isNotEmpty) {
+        return Image.asset(
+          listing!.imagePath,
+          width: 128,
+          height: 108,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _imageFallback(),
+        );
+      }
+    }
+
+    return _imageFallback();
+  }
+
+  Widget _imageFallback() {
+    return Container(
+      width: 128,
+      height: 108,
+      color: const Color(0xFFE2E6F0),
+      child: const Icon(Icons.home_work_outlined),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -581,18 +849,7 @@ class _ProjectCard extends StatelessWidget {
           children: [
             ClipRRect(
               borderRadius: const BorderRadius.horizontal(left: Radius.circular(16)),
-              child: Image.asset(
-                'assets/images/real_house_1.jpg',
-                width: 128,
-                height: 108,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => Container(
-                  width: 128,
-                  height: 108,
-                  color: const Color(0xFFE2E6F0),
-                  child: const Icon(Icons.home_work_outlined),
-                ),
-              ),
+              child: _buildProjectImage(),
             ),
             Expanded(
               child: Padding(
@@ -602,7 +859,7 @@ class _ProjectCard extends StatelessWidget {
                   children: [
                     Text(title, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
                     const SizedBox(height: 4),
-                    const Text('Location: Malabe', style: TextStyle(color: Color(0xFF30364A))),
+                    Text('Location: $location', style: const TextStyle(color: Color(0xFF30364A))),
                     Text('Started: $startedText', style: const TextStyle(color: Color(0xFF30364A))),
                     Text('Status: $statusText', style: const TextStyle(color: Color(0xFF30364A))),
                   ],
@@ -696,9 +953,13 @@ class _TeamCard extends StatelessWidget {
 }
 
 class _HotlineCard extends StatelessWidget {
-  final VoidCallback onTapVrew;
+  final VoidCallback? onTapVrew;
+  final bool isBusy;
 
-  const _HotlineCard({required this.onTapVrew});
+  const _HotlineCard({
+    required this.onTapVrew,
+    required this.isBusy,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -710,15 +971,24 @@ class _HotlineCard extends StatelessWidget {
       ),
       child: Row(
         children: [
-          const Expanded(
+          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Explore Your House', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-                SizedBox(height: 3),
-                Text('Call our hotline for project support', style: TextStyle(fontSize: 13)),
-                SizedBox(height: 2),
-                Text('+94 77 123 4567', style: TextStyle(fontWeight: FontWeight.w600)),
+                const Text(
+                  'Explore Your House',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  isBusy ? 'Preparing your VR payment sheet' : 'Call our hotline for project support',
+                  style: const TextStyle(fontSize: 13),
+                ),
+                const SizedBox(height: 2),
+                const Text(
+                  '+94 77 123 4567',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
               ],
             ),
           ),
@@ -734,10 +1004,19 @@ class _HotlineCard extends StatelessWidget {
                 color: const Color(0xFF2C47F8),
                 borderRadius: BorderRadius.circular(999),
               ),
-              child: const Text(
-                '🥽',
-                style: TextStyle(fontSize: 24),
-              ),
+              child: isBusy
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                      ),
+                    )
+                  : const Text(
+                      '🥽',
+                      style: TextStyle(fontSize: 24),
+                    ),
             ),
           ),
         ],

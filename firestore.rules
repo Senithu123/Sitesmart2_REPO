@@ -1,0 +1,112 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function hasUserDoc() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function roleIs(role) {
+      return hasUserDoc() && userDoc().data.role == role;
+    }
+
+    function isAdmin() {
+      return roleIs("Admin");
+    }
+
+    function isContractor() {
+      return roleIs("Contractor");
+    }
+
+    function isArchitect() {
+      return roleIs("Architect");
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function isOwnVrAccessDoc(accessId) {
+      return signedIn() && accessId.matches('^' + request.auth.uid + '_.*$');
+    }
+
+    function isProjectContractor(projectId) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/projects/$(projectId)) &&
+        get(/databases/$(database)/documents/projects/$(projectId)).data.contractorUid == request.auth.uid;
+    }
+
+    function isProjectClient(projectId) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/projects/$(projectId)) &&
+        get(/databases/$(database)/documents/projects/$(projectId)).data.clientUid == request.auth.uid;
+    }
+
+    function bookingOwnerCanEdit() {
+      return signedIn() &&
+        resource.data.userId == request.auth.uid &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "appointmentDate",
+          "status",
+          "notes",
+          "updatedAt"
+        ]);
+    }
+
+    // USERS
+    match /users/{userId} {
+      allow create: if isOwner(userId);
+      allow read, update: if isOwner(userId) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // BOOKINGS
+    match /bookings/{bookingId} {
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow read: if (signedIn() && resource.data.userId == request.auth.uid) || isAdmin();
+      allow update: if isAdmin() || bookingOwnerCanEdit();
+      allow delete: if isAdmin();
+    }
+
+    // PROJECTS
+    match /projects/{projectId} {
+      allow read: if signedIn();
+      allow create: if isAdmin() || isContractor();
+      allow update, delete: if isAdmin() || isContractor();
+
+      // TIMELINE
+      match /timeline/{phaseId} {
+        allow read: if signedIn();
+        allow create, update, delete: if isAdmin() || isContractor();
+      }
+
+      // BILLS
+      match /bills/{billId} {
+        allow read: if signedIn();
+        allow create, update, delete: if isAdmin();
+      }
+    }
+
+    // VR ACCESS
+    match /vr_access/{accessId} {
+      allow read: if isOwnVrAccessDoc(accessId) || isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // HOUSES
+    match /houses/{houseId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin() || isArchitect();
+    }
+  }
+}

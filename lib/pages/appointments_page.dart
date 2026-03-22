@@ -21,6 +21,26 @@ class AppointmentsPage extends StatefulWidget {
 
 class _AppointmentsPageState extends State<AppointmentsPage> {
   bool _updating = false;
+  static const String _workingHoursLabel = 'Work hours: Mon-Sat, 9:00 AM - 5:00 PM';
+
+  bool _isWorkingDay(DateTime date) {
+    return date.weekday >= DateTime.monday && date.weekday <= DateTime.saturday;
+  }
+
+  DateTime _nextWorkingDate(DateTime from) {
+    var candidate = DateTime(from.year, from.month, from.day).add(const Duration(days: 1));
+    while (!_isWorkingDay(candidate)) {
+      candidate = candidate.add(const Duration(days: 1));
+    }
+    return candidate;
+  }
+
+  bool _isWithinWorkingHours(TimeOfDay time) {
+    final totalMinutes = time.hour * 60 + time.minute;
+    const startMinutes = 9 * 60;
+    const endMinutes = 17 * 60;
+    return totalMinutes >= startMinutes && totalMinutes <= endMinutes;
+  }
 
   String _formatDate(DateTime? date) {
     if (date == null) return 'Not scheduled';
@@ -53,22 +73,71 @@ class _AppointmentsPageState extends State<AppointmentsPage> {
       return;
     }
 
-    final now = DateTime.now();
-    final date = await showDatePicker(
-      context: context,
-      initialDate: now.add(const Duration(days: 1)),
-      firstDate: now,
-      lastDate: now.add(const Duration(days: 365)),
-    );
+    FocusScope.of(context).unfocus();
 
-    if (date == null) return;
+    late final DateTime scheduledAt;
+    try {
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      final initialDate = widget.appointmentDate != null
+          ? DateTime(
+              widget.appointmentDate!.year,
+              widget.appointmentDate!.month,
+              widget.appointmentDate!.day,
+            )
+          : _nextWorkingDate(now);
+
+      final date = await showDatePicker(
+        context: context,
+        initialDate: initialDate,
+        firstDate: today,
+        lastDate: today.add(const Duration(days: 365)),
+        selectableDayPredicate: _isWorkingDay,
+      );
+
+      if (date == null) return;
+
+      final initialTime = widget.appointmentDate != null
+          ? TimeOfDay.fromDateTime(widget.appointmentDate!)
+          : const TimeOfDay(hour: 9, minute: 0);
+
+      final time = await showTimePicker(
+        context: context,
+        initialTime: initialTime,
+        helpText: 'Select appointment time',
+      );
+
+      if (time == null) return;
+
+      if (!_isWithinWorkingHours(time)) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please choose a time between 9:00 AM and 5:00 PM.')),
+        );
+        return;
+      }
+
+      scheduledAt = DateTime(
+        date.year,
+        date.month,
+        date.day,
+        time.hour,
+        time.minute,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Couldn't open date and time picker: $e")),
+      );
+      return;
+    }
 
     if (!mounted) return;
     setState(() => _updating = true);
 
     try {
       await FirebaseFirestore.instance.collection('bookings').doc(widget.bookingId).update({
-        'appointmentDate': Timestamp.fromDate(date),
+        'appointmentDate': Timestamp.fromDate(scheduledAt),
         'status': 'Rescheduled',
       });
 
@@ -157,6 +226,14 @@ class _AppointmentsPageState extends State<AppointmentsPage> {
                       const Icon(Icons.info_outline, size: 18),
                       const SizedBox(width: 8),
                       Expanded(child: Text('Status: ${widget.status}')),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Row(
+                    children: [
+                      Icon(Icons.access_time, size: 18),
+                      SizedBox(width: 8),
+                      Expanded(child: Text(_workingHoursLabel)),
                     ],
                   ),
                 ],

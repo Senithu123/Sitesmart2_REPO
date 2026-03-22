@@ -12,5 +12,6 @@
       "default": true
     }
   ],
-  "java.configuration.updateBuildConfiguration": "interactive"
+  "java.configuration.updateBuildConfiguration": "interactive",
+  "cmake.sourceDirectory": "D:/site_smart2/site_smart2/linux"
 }

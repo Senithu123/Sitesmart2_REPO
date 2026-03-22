@@ -115,7 +115,7 @@ class _ProfilePageState extends State<ProfilePage> {
           _DetailItem('Booking Status', (latestBookingData['status'] ?? 'No booking yet').toString()),
           _DetailItem(
             'Appointment Date',
-            _formatDate(_readDate(latestBookingData['appointmentDate'])),
+            _formatDate(_readDate(latestBookingData['appointmentDate']), includeTime: true),
           ),
           _DetailItem('Project Status', (projectData['status'] ?? 'Not started').toString()),
           _DetailItem('Project Location', (projectData['location'] ?? latestBookingData['location'] ?? '-').toString()),
@@ -253,7 +253,11 @@ class _ProfilePageState extends State<ProfilePage> {
     return status.contains('approved') || status.contains('access granted');
   }
 
-  String _formatDate(DateTime? date, {String fallback = '-'}) {
+  String _formatDate(
+    DateTime? date, {
+    String fallback = '-',
+    bool includeTime = false,
+  }) {
     if (date == null) return fallback;
     const months = [
       'Jan',
@@ -269,7 +273,12 @@ class _ProfilePageState extends State<ProfilePage> {
       'Nov',
       'Dec',
     ];
-    return '${date.day} ${months[date.month - 1]} ${date.year}';
+    final base = '${date.day} ${months[date.month - 1]} ${date.year}';
+    if (!includeTime) return base;
+    final hour = date.hour == 0 ? 12 : (date.hour > 12 ? date.hour - 12 : date.hour);
+    final minute = date.minute.toString().padLeft(2, '0');
+    final ampm = date.hour >= 12 ? 'PM' : 'AM';
+    return '$base, $hour:$minute $ampm';
   }
 
   Future<void> logout() async {

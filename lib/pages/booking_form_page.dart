@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
-import 'project_waiting_page.dart';
+import 'booking_confirmation_page.dart';
 
 class BookingFormPage extends StatefulWidget {
   final String houseTitle;
@@ -24,8 +24,12 @@ class _BookingFormPageState extends State<BookingFormPage> {
   final TextEditingController notesCtrl = TextEditingController();
 
   DateTime? selectedDate;
+  TimeOfDay? selectedTime;
   bool isSaving = false;
   String userEmail = "";
+  final TextEditingController appointmentCtrl = TextEditingController();
+
+  static const String _workingHoursLabel = "Work hours: Mon-Sat, 9:00 AM - 5:00 PM";
 
   @override
   void initState() {
@@ -38,6 +42,7 @@ class _BookingFormPageState extends State<BookingFormPage> {
     nameCtrl.dispose();
     phoneCtrl.dispose();
     notesCtrl.dispose();
+    appointmentCtrl.dispose();
     super.dispose();
   }
 
@@ -62,19 +67,116 @@ class _BookingFormPageState extends State<BookingFormPage> {
     } catch (_) {}
   }
 
-  Future<void> pickDate() async {
-    // Let customer pick an appointment date.
-    DateTime now = DateTime.now();
-    DateTime? picked = await showDatePicker(
-      context: context,
-      initialDate: now.add(const Duration(days: 1)),
-      firstDate: now,
-      lastDate: now.add(const Duration(days: 365)),
-    );
-    if (picked != null) {
+  bool _isWorkingDay(DateTime date) {
+    return date.weekday >= DateTime.monday && date.weekday <= DateTime.saturday;
+  }
+
+  DateTime _nextWorkingDate(DateTime from) {
+    var candidate = DateTime(from.year, from.month, from.day).add(const Duration(days: 1));
+    while (!_isWorkingDay(candidate)) {
+      candidate = candidate.add(const Duration(days: 1));
+    }
+    return candidate;
+  }
+
+  bool _isWithinWorkingHours(TimeOfDay time) {
+    final totalMinutes = time.hour * 60 + time.minute;
+    const startMinutes = 9 * 60;
+    const endMinutes = 17 * 60;
+    return totalMinutes >= startMinutes && totalMinutes <= endMinutes;
+  }
+
+  String _formatAppointmentDateTime(DateTime? date) {
+    if (date == null) {
+      return "Select appointment date and time";
+    }
+
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    final hour = date.hour == 0 ? 12 : (date.hour > 12 ? date.hour - 12 : date.hour);
+    final minute = date.minute.toString().padLeft(2, '0');
+    final ampm = date.hour >= 12 ? 'PM' : 'AM';
+    return '${date.day} ${months[date.month - 1]} ${date.year} at $hour:$minute $ampm';
+  }
+
+  Future<void> pickDateTime() async {
+    // Let customer pick an appointment date and time within working hours.
+    FocusScope.of(context).unfocus();
+
+    try {
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      final initialDate = selectedDate != null
+          ? DateTime(selectedDate!.year, selectedDate!.month, selectedDate!.day)
+          : _nextWorkingDate(now);
+
+      final picked = await showDatePicker(
+        context: context,
+        initialDate: initialDate,
+        firstDate: today,
+        lastDate: today.add(const Duration(days: 365)),
+        selectableDayPredicate: _isWorkingDay,
+      );
+      if (picked == null) return;
+
+      if (!_isWorkingDay(picked)) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Appointments are available only from Monday to Saturday.")),
+        );
+        return;
+      }
+
+      final initialTime = selectedTime ??
+          const TimeOfDay(
+            hour: 9,
+            minute: 0,
+          );
+
+      final pickedTime = await showTimePicker(
+        context: context,
+        initialTime: initialTime,
+        helpText: 'Select appointment time',
+      );
+
+      if (pickedTime == null) return;
+
+      if (!_isWithinWorkingHours(pickedTime)) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Please choose a time between 9:00 AM and 5:00 PM.")),
+        );
+        return;
+      }
+
       setState(() {
-        selectedDate = picked;
+        selectedTime = pickedTime;
+        selectedDate = DateTime(
+          picked.year,
+          picked.month,
+          picked.day,
+          pickedTime.hour,
+          pickedTime.minute,
+        );
+        appointmentCtrl.text = _formatAppointmentDateTime(selectedDate);
       });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Couldn't open date and time picker: $e")),
+      );
     }
   }
 
@@ -100,7 +202,7 @@ class _BookingFormPageState extends State<BookingFormPage> {
       }
 
       // Save booking with "pending" status until admin approves.
-      await FirebaseFirestore.instance.collection("bookings").add({
+      final bookingRef = await FirebaseFirestore.instance.collection("bookings").add({
         "userId": user.uid,
         "userEmail": userEmail,
         "customerName": nameCtrl.text.trim(),
@@ -122,8 +224,14 @@ class _BookingFormPageState extends State<BookingFormPage> {
 
       Navigator.pushAndRemoveUntil(
         context,
-        // After booking, move customer to waiting interface.
-        MaterialPageRoute(builder: (context) => const ProjectWaitingPage()),
+        MaterialPageRoute(
+          builder: (context) => BookingConfirmationPage(
+            bookingId: bookingRef.id,
+            meetingDate: selectedDate,
+            houseTitle: widget.houseTitle,
+            openWaitingPageOnDone: true,
+          ),
+        ),
         (route) => false,
       );
     } catch (e) {
@@ -139,9 +247,7 @@ class _BookingFormPageState extends State<BookingFormPage> {
 
   @override
   Widget build(BuildContext context) {
-    String dateText = selectedDate == null
-        ? "Select appointment date"
-        : "${selectedDate!.day}-${selectedDate!.month}-${selectedDate!.year}";
+    appointmentCtrl.text = _formatAppointmentDateTime(selectedDate);
 
     return Scaffold(
       backgroundColor: const Color(0xFFEFEFF0),
@@ -181,23 +287,41 @@ class _BookingFormPageState extends State<BookingFormPage> {
               ),
             ),
             const SizedBox(height: 12),
-            InkWell(
-              onTap: pickDate,
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 15),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  border: Border.all(color: Colors.black26),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.calendar_month_outlined),
-                    const SizedBox(width: 8),
-                    Text(dateText),
-                  ],
-                ),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFE9F1FF),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFB8CBFF)),
+              ),
+              child: const Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.access_time, color: Color(0xFF1E2BFF)),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _workingHoursLabel,
+                      style: TextStyle(
+                        color: Color(0xFF17308A),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: appointmentCtrl,
+              readOnly: true,
+              onTap: pickDateTime,
+              decoration: const InputDecoration(
+                labelText: "Appointment Date & Time *",
+                hintText: "Select appointment date and time",
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.calendar_month_outlined),
               ),
             ),
             const SizedBox(height: 12),

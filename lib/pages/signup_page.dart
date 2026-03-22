@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/services.dart';
 
 class SignupPage extends StatefulWidget {
   const SignupPage({super.key});
@@ -21,6 +22,10 @@ class _SignupPageState extends State<SignupPage> {
   String role = 'Client';
 
   bool loading = false;
+
+  bool _isValidPhoneNumber(String phone) {
+    return RegExp(r'^0\d{9}$').hasMatch(phone);
+  }
 
   @override
   void dispose() {
@@ -53,6 +58,13 @@ class _SignupPageState extends State<SignupPage> {
     if (password != confirmPassword) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Passwords do not match")),
+      );
+      return;
+    }
+
+    if (!_isValidPhoneNumber(phone)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Phone number must start with 0 and contain exactly 10 digits")),
       );
       return;
     }
@@ -177,6 +189,10 @@ class _SignupPageState extends State<SignupPage> {
                 child: TextField(
                   controller: phoneCtrl,
                   keyboardType: TextInputType.phone,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(10),
+                  ],
                   decoration: const InputDecoration(
                     hintText: 'Enter phone number',
                     border: InputBorder.none,

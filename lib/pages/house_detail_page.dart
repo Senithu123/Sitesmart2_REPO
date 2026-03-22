@@ -1,15 +1,19 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter_stripe/flutter_stripe.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'home_page.dart';
 import 'profile_page.dart';
 import 'booking_form_page.dart';
-import '../services/stripe_vr_payment_service.dart';
+import '../services/vr_payment_service.dart';
 import 'vr_view.dart';
 
 class HouseDetailPage extends StatefulWidget {
   final String imagePath;
+  final String imageUrl;
+  final List<String> galleryPaths;
   final String houseName;
   final String priceText;
   final String vrUrl;
@@ -24,6 +28,8 @@ class HouseDetailPage extends StatefulWidget {
   const HouseDetailPage({
     super.key,
     required this.imagePath,
+    this.imageUrl = '',
+    this.galleryPaths = const [],
     required this.houseName,
     required this.priceText,
     required this.vrUrl,
@@ -43,34 +49,15 @@ class HouseDetailPage extends StatefulWidget {
 class _HouseDetailPageState extends State<HouseDetailPage> {
   static const double _bottomNavigationBarHeight = 64;
   final PageController _galleryController = PageController(viewportFraction: 1);
-  static const List<_VrSubscriptionPlan> _vrPlans = [
-    _VrSubscriptionPlan(
-      id: 'vr_basic',
-      title: 'VR Basic',
-      priceLabel: 'Rs. 1,500',
-      amount: 1500,
-      description: 'Single property VR access with in-app viewing.',
-    ),
-    _VrSubscriptionPlan(
-      id: 'vr_premium',
-      title: 'VR Premium',
-      priceLabel: 'Rs. 3,000',
-      amount: 3000,
-      description: 'Priority VR access with repeated viewing for premium tours.',
-    ),
-  ];
   int _selectedImageIndex = 0;
   String userName = "";
-  String userRole = "";
-  bool _isCheckingVrSubscription = true;
-  bool _isSavingVrSubscription = false;
-  _VrSubscriptionPlan? _activeVrPlan;
+  String userRole = "Client";
+  bool _isVrAccessBusy = false;
 
   @override
   void initState() {
     super.initState();
     loadUserData();
-    _loadVrSubscription();
   }
 
   @override
@@ -86,7 +73,6 @@ class _HouseDetailPageState extends State<HouseDetailPage> {
         if (!mounted) return;
         setState(() {
           userName = "User";
-          userRole = "Client";
         });
         return;
       }
@@ -112,119 +98,60 @@ class _HouseDetailPageState extends State<HouseDetailPage> {
     }
   }
 
-  Future<void> _loadVrSubscription() async {
-    try {
-      final currentUser = FirebaseAuth.instance.currentUser;
-      if (currentUser == null) {
-        if (!mounted) return;
-        setState(() {
-          _isCheckingVrSubscription = false;
-          _activeVrPlan = null;
-        });
-        return;
-      }
-
-      final userDoc = await FirebaseFirestore.instance
-          .collection("users")
-          .doc(currentUser.uid)
-          .get();
-      final data = (userDoc.data() as Map<String, dynamic>?) ?? {};
-      final status = (data["vrSubscriptionStatus"] ?? "").toString().toLowerCase();
-      final active = status == "active";
-      final amount = (data["vrSubscriptionAmount"] as num?)?.toInt();
-      _VrSubscriptionPlan? matchedPlan;
-
-      if (active) {
-        for (final plan in _vrPlans) {
-          if (plan.amount == amount) {
-            matchedPlan = plan;
-            break;
-          }
-        }
-      }
-
-      if (!mounted) return;
-      setState(() {
-        _activeVrPlan = active ? (matchedPlan ?? _vrPlans.first) : null;
-        _isCheckingVrSubscription = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _isCheckingVrSubscription = false;
-        _activeVrPlan = null;
-      });
-    }
-  }
-
   Future<void> _handleVrAccess() async {
-    if (_isCheckingVrSubscription || _isSavingVrSubscription) return;
+    if (widget.vrUrl.trim().isEmpty) {
+      _showBottomSafeSnackBar('VR view is not available for this house yet.');
+      return;
+    }
+    if (_isVrAccessBusy) return;
 
-    if (_activeVrPlan != null) {
-      _openVrView();
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) {
+      _showBottomSafeSnackBar('Please sign in to unlock VR access.');
       return;
     }
 
-    final selectedPlan = await showModalBottomSheet<_VrSubscriptionPlan>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => _VrSubscriptionSheet(plans: _vrPlans),
-    );
-
-    if (selectedPlan == null) return;
-
-    await _activateVrSubscription(selectedPlan);
-  }
-
-  Future<void> _activateVrSubscription(_VrSubscriptionPlan plan) async {
     setState(() {
-      _isSavingVrSubscription = true;
+      _isVrAccessBusy = true;
     });
 
     try {
-      final currentUser = FirebaseAuth.instance.currentUser;
-
-      await StripeVrPaymentService.payForVrSubscription(
-        planId: plan.id,
-        merchantDisplayName: 'Site Smart',
+      final hasAccess = await VrPaymentService.hasVrAccess(
+        houseTitle: widget.houseName,
       );
+      if (!mounted) return;
 
-      if (currentUser != null) {
-        await FirebaseFirestore.instance.collection("users").doc(currentUser.uid).set({
-          "vrSubscriptionId": plan.id,
-          "vrSubscriptionName": plan.title,
-          "vrSubscriptionAmount": plan.amount,
-          "vrSubscriptionPriceLabel": plan.priceLabel,
-          "vrSubscriptionStatus": "active",
-          "vrSubscriptionActivatedAt": Timestamp.now(),
-        }, SetOptions(merge: true));
+      if (hasAccess) {
+        _openVrView();
+        return;
       }
 
-      if (!mounted) return;
-      setState(() {
-        _activeVrPlan = plan;
-      });
+      if (!VrPaymentService.supportsNativeVrPayments) {
+        _showBottomSafeSnackBar(VrPaymentService.unsupportedPlatformMessage);
+        return;
+      }
 
-      _showBottomSafeSnackBar(
-        '${plan.title} activated. VR access unlocked.',
+      final shouldContinue = await _showVrPaymentDialog();
+      if (!mounted || !shouldContinue) return;
+
+      await VrPaymentService.payForVrAccess(
+        houseTitle: widget.houseName,
+        customerName: _resolveCustomerName(currentUser),
+        email: currentUser.email ?? '',
       );
+      if (!mounted) return;
 
+      _showBottomSafeSnackBar('Payment successful. VR access unlocked.');
       _openVrView();
-    } on StripeException catch (error) {
+    } catch (error) {
       if (!mounted) return;
-      final message = error.error.localizedMessage ?? 'Stripe payment was cancelled.';
-      _showBottomSafeSnackBar(message);
-    } catch (_) {
-      if (!mounted) return;
-      _showBottomSafeSnackBar(
-        'Unable to complete VR subscription payment right now.',
-      );
+      _showBottomSafeSnackBar(VrPaymentService.describeError(error));
     } finally {
-      if (!mounted) return;
-      setState(() {
-        _isSavingVrSubscription = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isVrAccessBusy = false;
+        });
+      }
     }
   }
 
@@ -261,7 +188,55 @@ class _HouseDetailPageState extends State<HouseDetailPage> {
     );
   }
 
+  String _resolveCustomerName(User user) {
+    final candidate = userName.trim();
+    if (candidate.isNotEmpty && candidate.toLowerCase() != 'user') {
+      return candidate;
+    }
+
+    final displayName = user.displayName?.trim() ?? '';
+    if (displayName.isNotEmpty) {
+      return displayName;
+    }
+
+    final emailPrefix = user.email?.split('@').first.trim() ?? '';
+    return emailPrefix.isEmpty ? 'Site Smart Customer' : emailPrefix;
+  }
+
+  Future<bool> _showVrPaymentDialog() async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          title: const Text('Unlock VR Tour'),
+          content: Text(
+            'This account needs a one-time ${VrPaymentService.vrPriceLabel} Stripe payment to unlock all VR tours.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: Text('Pay ${VrPaymentService.vrPriceLabel}'),
+            ),
+          ],
+        );
+      },
+    );
+
+    return result ?? false;
+  }
+
   List<String> _buildGalleryImages(String imagePath) {
+    if (widget.galleryPaths.isNotEmpty) {
+      return widget.galleryPaths;
+    }
+    if (widget.imageUrl.trim().isNotEmpty) {
+      return [widget.imageUrl.trim()];
+    }
     if (imagePath == 'assets/home1_imgs/1.png') {
       return List<String>.generate(6, (index) => 'assets/home1_imgs/${index + 1}.png');
     }
@@ -285,6 +260,42 @@ class _HouseDetailPageState extends State<HouseDetailPage> {
       return '1';
     }
     return widget.bathrooms;
+  }
+
+  Widget _buildGalleryImage(String source) {
+    final isNetwork = source.startsWith('http://') || source.startsWith('https://');
+    if (isNetwork) {
+      return Image.network(
+        source,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) => _imageFallback(),
+      );
+    }
+    final isLocalFile = source.contains('\\') || source.startsWith('/');
+    if (!kIsWeb && isLocalFile) {
+      return Image.file(
+        File(source),
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) => _imageFallback(),
+      );
+    }
+    return Image.asset(
+      source,
+      fit: BoxFit.cover,
+      errorBuilder: (context, error, stackTrace) => _imageFallback(),
+    );
+  }
+
+  Widget _imageFallback() {
+    return Container(
+      color: const Color(0xFFE8ECF4),
+      alignment: Alignment.center,
+      child: const Icon(
+        Icons.home_work_outlined,
+        size: 48,
+        color: Color(0xFF5B678D),
+      ),
+    );
   }
 
   @override
@@ -410,10 +421,7 @@ class _HouseDetailPageState extends State<HouseDetailPage> {
                                 });
                               },
                               itemBuilder: (context, index) {
-                                return Image.asset(
-                                  galleryImages[index],
-                                  fit: BoxFit.cover,
-                                );
+                                return _buildGalleryImage(galleryImages[index]);
                               },
                             ),
                             if (galleryImages.length > 1)
@@ -604,13 +612,13 @@ class _HouseDetailPageState extends State<HouseDetailPage> {
                           const Row(
                             children: [
                               Icon(
-                                Icons.subscriptions_outlined,
+                                Icons.view_in_ar_outlined,
                                 size: 18,
                                 color: Color(0xFF1E2BFF),
                               ),
                               SizedBox(width: 8),
                               Text(
-                                'VR Subscription',
+                                'VR Tour Ready',
                                 style: TextStyle(
                                   fontWeight: FontWeight.w700,
                                   color: Color(0xFF1E2BFF),
@@ -620,11 +628,9 @@ class _HouseDetailPageState extends State<HouseDetailPage> {
                           ),
                           const SizedBox(height: 8),
                           Text(
-                            _isCheckingVrSubscription
-                                ? 'Checking your VR access...'
-                                : _activeVrPlan != null
-                                    ? 'Active plan: ${_activeVrPlan!.title} (${_activeVrPlan!.priceLabel})'
-                                    : 'Subscribe to unlock the View VR option. Plans available: Rs. 1,500 and Rs. 3,000.',
+                            widget.vrUrl.trim().isEmpty
+                                ? 'VR tour has not been added for this house yet.'
+                                : 'Open the immersive 360 property tour now. Works with Meta Quest browser or in-app preview. One-time access fee: ${VrPaymentService.vrPriceLabel} and it unlocks all VR tours.',
                             style: const TextStyle(
                               fontSize: 12,
                               color: Colors.black87,
@@ -638,15 +644,17 @@ class _HouseDetailPageState extends State<HouseDetailPage> {
                       children: [
                         Expanded(
                           child: OutlinedButton.icon(
-                            onPressed: _handleVrAccess,
-                            icon: const Icon(Icons.view_in_ar_outlined, size: 16),
-                            label: Text(
-                              _isSavingVrSubscription
-                                  ? 'Activating...'
-                                  : _activeVrPlan != null
-                                      ? 'View VR'
-                                      : 'Subscribe for VR',
-                            ),
+                            onPressed: widget.vrUrl.trim().isEmpty || _isVrAccessBusy
+                                ? null
+                                : _handleVrAccess,
+                            icon: _isVrAccessBusy
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                  )
+                                : const Icon(Icons.view_in_ar_outlined, size: 16),
+                            label: Text(_isVrAccessBusy ? 'Preparing...' : 'View VR'),
                           ),
                         ),
                         const SizedBox(width: 10),
@@ -742,143 +750,6 @@ class _HouseDetailPageState extends State<HouseDetailPage> {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _VrSubscriptionPlan {
-  final String id;
-  final String title;
-  final String priceLabel;
-  final int amount;
-  final String description;
-
-  const _VrSubscriptionPlan({
-    required this.id,
-    required this.title,
-    required this.priceLabel,
-    required this.amount,
-    required this.description,
-  });
-}
-
-class _VrSubscriptionSheet extends StatelessWidget {
-  final List<_VrSubscriptionPlan> plans;
-
-  const _VrSubscriptionSheet({required this.plans});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(18, 18, 18, 24),
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      child: SafeArea(
-        top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 52,
-                height: 5,
-                decoration: BoxDecoration(
-                  color: Colors.black12,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'Choose a VR subscription',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              'Subscribe first to unlock the View VR experience for this property.',
-              style: TextStyle(fontSize: 13, color: Colors.black54),
-            ),
-            const SizedBox(height: 18),
-            ...plans.map(
-              (plan) => Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: _VrPlanCard(plan: plan),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _VrPlanCard extends StatelessWidget {
-  final _VrSubscriptionPlan plan;
-
-  const _VrPlanCard({required this.plan});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF8F9FF),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFD9E0FF)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  plan.title,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1E2BFF),
-                  borderRadius: BorderRadius.circular(999),
-                ),
-                child: Text(
-                  plan.priceLabel,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Text(
-            plan.description,
-            style: const TextStyle(fontSize: 12, color: Colors.black87),
-          ),
-          const SizedBox(height: 14),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              onPressed: () => Navigator.pop(context, plan),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF1E2BFF),
-                foregroundColor: Colors.white,
-              ),
-              child: const Text('Subscribe and continue'),
-            ),
-          ),
-        ],
       ),
     );
   }
