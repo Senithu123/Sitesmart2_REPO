@@ -36,7 +36,7 @@ class _SignupPageState extends State<SignupPage> {
     confirmCtrl.dispose();
     super.dispose();
   }
-
+//// validation added for email and password fields
   Future<void> signUpUser() async {
     String fullName = nameCtrl.text.trim();
     String email = emailCtrl.text.trim();
