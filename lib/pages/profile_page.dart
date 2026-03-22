@@ -3,7 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import 'login_page.dart';
-
+// Improving profile management (validation and UI handling)
 class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
 
