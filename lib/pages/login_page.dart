@@ -106,6 +106,7 @@ class _LoginPageState extends State<LoginPage> {
         if (!mounted) return;
 
         // Step 3: Route user by role.
+        // Added role-based login handling (Client / Contractor / Admin)
         if (role == 'Client') {
           final destination = await _resolveClientLandingPage(uid);
           if (!mounted) return;
