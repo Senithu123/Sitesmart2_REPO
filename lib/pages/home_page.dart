@@ -372,6 +372,7 @@ class _HomePageState extends State<HomePage> {
                           context,
                           MaterialPageRoute(
                             builder: (context) => HouseDetailPage(
+                              houseId: listing.id,
                               imagePath: listing.imagePath,
                               imageUrl: listing.imageUrl,
                               galleryPaths: listing.galleryPaths,

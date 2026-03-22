@@ -59,6 +59,17 @@ class _TimelinePageState extends State<TimelinePage> {
       'imageCount': 0,
       'status': 'Not Started',
     },
+    {
+      'id': 'finishing_work',
+      'order': 4,
+      'title': 'Finishing Work',
+      'dateRange': 'Jan 1 - Jan 20',
+      'percentage': 0,
+      'tasksCompleted': 0,
+      'totalTasks': 4,
+      'imageCount': 0,
+      'status': 'Not Started',
+    },
   ];
 
   @override
@@ -163,6 +174,32 @@ class _TimelinePageState extends State<TimelinePage> {
     return '${date.day} ${months[date.month - 1]} ${date.year}';
   }
 
+  List<Map<String, dynamic>> _mergeTimelineWithDefaults(
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+  ) {
+    final merged = <String, Map<String, dynamic>>{
+      for (final phase in _defaultPhases) phase['id'].toString(): Map<String, dynamic>.from(phase),
+    };
+
+    for (final doc in docs) {
+      merged[doc.id] = {
+        ...(merged[doc.id] ?? <String, dynamic>{}),
+        ...doc.data(),
+      };
+    }
+
+    final phases = merged.values.toList();
+    phases.sort(
+      (a, b) => ((a['order'] ?? 999) as num).toInt().compareTo(((b['order'] ?? 999) as num).toInt()),
+    );
+    return phases;
+  }
+
+  EdgeInsets _pagePadding(BuildContext context) {
+    final bottomInset = MediaQuery.of(context).padding.bottom;
+    return EdgeInsets.fromLTRB(12, 12, 12, bottomInset + 24);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -174,7 +211,7 @@ class _TimelinePageState extends State<TimelinePage> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
-              padding: const EdgeInsets.all(12),
+              padding: _pagePadding(context),
               children: [
                 const Text(
                   'Project Timeline',
@@ -185,6 +222,22 @@ class _TimelinePageState extends State<TimelinePage> {
                   style: TextStyle(fontSize: 13, color: Color(0xFF5C6479)),
                 ),
                 const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE8EEFF),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    '${_defaultPhases.length} phases in this project timeline',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF2945A0),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
                 _ProjectHeader(
                   projectName: _projectName,
                   startedText: _startedText,
@@ -192,7 +245,13 @@ class _TimelinePageState extends State<TimelinePage> {
                 ),
                 const SizedBox(height: 10),
                 if (_projectId == null)
-                  ..._defaultPhases.map((e) => _PhaseCard(data: e))
+                  ..._defaultPhases.map(
+                    (e) => _PhaseCard(
+                      key: ValueKey(e['id']),
+                      data: e,
+                      totalPhases: _defaultPhases.length,
+                    ),
+                  )
                 else
                   StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                     stream: FirebaseFirestore.instance
@@ -214,7 +273,11 @@ class _TimelinePageState extends State<TimelinePage> {
                           children: _defaultPhases
                               .map((e) => Padding(
                                     padding: const EdgeInsets.only(bottom: 8),
-                                    child: _PhaseCard(data: e),
+                                    child: _PhaseCard(
+                                      key: ValueKey(e['id']),
+                                      data: e,
+                                      totalPhases: _defaultPhases.length,
+                                    ),
                                   ))
                               .toList(),
                         );
@@ -226,18 +289,27 @@ class _TimelinePageState extends State<TimelinePage> {
                           children: _defaultPhases
                               .map((e) => Padding(
                                     padding: const EdgeInsets.only(bottom: 8),
-                                    child: _PhaseCard(data: e),
+                                    child: _PhaseCard(
+                                      key: ValueKey(e['id']),
+                                      data: e,
+                                      totalPhases: _defaultPhases.length,
+                                    ),
                                   ))
                               .toList(),
                         );
                       }
 
+                      final phases = _mergeTimelineWithDefaults(docs);
                       return Column(
-                        children: docs
+                        children: phases
                             .map(
-                              (d) => Padding(
+                              (phase) => Padding(
                                 padding: const EdgeInsets.only(bottom: 8),
-                                child: _PhaseCard(data: d.data()),
+                                child: _PhaseCard(
+                                  key: ValueKey(phase['id']),
+                                  data: phase,
+                                  totalPhases: phases.length,
+                                ),
                               ),
                             )
                             .toList(),
@@ -286,21 +358,26 @@ class _ProjectHeader extends StatelessWidget {
 
 class _PhaseCard extends StatefulWidget {
   final Map<String, dynamic> data;
+  final int totalPhases;
 
-  const _PhaseCard({required this.data});
+  const _PhaseCard({
+    super.key,
+    required this.data,
+    required this.totalPhases,
+  });
 
   @override
   State<_PhaseCard> createState() => _PhaseCardState();
 }
 
 class _PhaseCardState extends State<_PhaseCard> {
-  bool _showTasks = false;
-  bool _showPhotos = false;
+  bool _showDetails = false;
 
   @override
   Widget build(BuildContext context) {
     final data = widget.data;
     final title = (data['title'] ?? 'Phase').toString();
+    final order = ((data['order'] ?? 0) as num).toInt();
     final dateRange = (data['dateRange'] ?? '').toString();
     final status = (data['status'] ?? 'Active').toString();
     final percentage = ((data['percentage'] ?? 0) as num).toInt().clamp(0, 100);
@@ -326,7 +403,17 @@ class _PhaseCardState extends State<_PhaseCard> {
           Row(
             children: [
               Expanded(
-                child: Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Phase $order of ${widget.totalPhases}',
+                      style: const TextStyle(fontSize: 11, color: Color(0xFF667089)),
+                    ),
+                  ],
+                ),
               ),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -350,8 +437,8 @@ class _PhaseCardState extends State<_PhaseCard> {
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               SizedBox(
-                width: 76,
-                height: 76,
+                width: 60,
+                height: 60,
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
@@ -364,26 +451,26 @@ class _PhaseCardState extends State<_PhaseCard> {
                     Center(
                       child: Text(
                         '$percentage%',
-                        style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
                       ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: 14),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Progress', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 6),
+                    const Text('Progress', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 4),
                     LinearProgressIndicator(
                       value: percentage / 100,
                       minHeight: 6,
                       backgroundColor: const Color(0xFFE4E8F1),
                       color: const Color(0xFF27304A),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 6),
                     Row(
                       children: [
                         const Icon(Icons.check_circle_outline, size: 15, color: Color(0xFF4D566D)),
@@ -403,23 +490,21 @@ class _PhaseCardState extends State<_PhaseCard> {
               ),
             ],
           ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              TextButton.icon(
-                onPressed: () => setState(() => _showTasks = !_showTasks),
-                icon: Icon(_showTasks ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down),
-                label: const Text('Tasks'),
-              ),
-              const SizedBox(width: 8),
-              TextButton.icon(
-                onPressed: () => setState(() => _showPhotos = !_showPhotos),
-                icon: Icon(_showPhotos ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down),
-                label: const Text('Photos'),
-              ),
-            ],
+          const SizedBox(height: 6),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: () => setState(() => _showDetails = !_showDetails),
+              icon: Icon(_showDetails ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down),
+              label: Text(_showDetails ? 'Hide details' : 'View details'),
+            ),
           ),
-          if (_showTasks) ...[
+          if (_showDetails) ...[
+            const SizedBox(height: 6),
+            const Text(
+              'Tasks',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFF5A46C8)),
+            ),
             const SizedBox(height: 6),
             if (tasks.isEmpty)
               const Text('No task details available', style: TextStyle(fontSize: 12, color: Colors.black54))
@@ -448,8 +533,11 @@ class _PhaseCardState extends State<_PhaseCard> {
                   ),
                 ),
               ),
-          ],
-          if (_showPhotos) ...[
+            const SizedBox(height: 6),
+            const Text(
+              'Photos',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFF5A46C8)),
+            ),
             const SizedBox(height: 6),
             if (photos.isEmpty)
               const Text('No photos available', style: TextStyle(fontSize: 12, color: Colors.black54))
@@ -459,17 +547,12 @@ class _PhaseCardState extends State<_PhaseCard> {
                 runSpacing: 8,
                 children: photos
                     .map(
-                      (p) => ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: _looksLikeUrl(p)
-                            ? Image.network(
-                                p,
-                                width: 72,
-                                height: 72,
-                                fit: BoxFit.cover,
-                                errorBuilder: (_, __, ___) => _photoFallback(p),
-                              )
-                            : _photoFallback(p),
+                      (p) => GestureDetector(
+                        onTap: _canPreviewPhoto(p) ? () => _showPhotoPreview(p) : null,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: _buildPhoto(p),
+                        ),
                       ),
                     )
                     .toList(),
@@ -516,6 +599,123 @@ class _PhaseCardState extends State<_PhaseCard> {
     return v.startsWith('http://') || v.startsWith('https://');
   }
 
+  bool _isInlineImageData(String value) {
+    return value.trim().toLowerCase().startsWith('data:image/');
+  }
+
+  bool _canPreviewPhoto(String value) {
+    final trimmed = value.trim();
+    return _looksLikeUrl(trimmed) || _isInlineImageData(trimmed);
+  }
+
+  void _showPhotoPreview(String value) {
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black87,
+      builder: (dialogContext) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.all(16),
+          child: Stack(
+            children: [
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: AspectRatio(
+                  aspectRatio: 1,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: InteractiveViewer(
+                      minScale: 0.8,
+                      maxScale: 4,
+                      child: _buildPreviewPhoto(value),
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 18,
+                right: 18,
+                child: Material(
+                  color: Colors.black54,
+                  shape: const CircleBorder(),
+                  child: IconButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(),
+                    icon: const Icon(Icons.close, color: Colors.white),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildPhoto(String value) {
+    final trimmed = value.trim();
+    if (_looksLikeUrl(trimmed)) {
+      return Image.network(
+        trimmed,
+        width: 72,
+        height: 72,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => _photoFallback(trimmed),
+      );
+    }
+
+    if (_isInlineImageData(trimmed)) {
+      final bytes = _decodeInlineImage(trimmed);
+      if (bytes != null) {
+        return Image.memory(
+          bytes,
+          width: 72,
+          height: 72,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _photoFallback(trimmed),
+        );
+      }
+    }
+
+    return _photoFallback(trimmed);
+  }
+
+  Widget _buildPreviewPhoto(String value) {
+    final trimmed = value.trim();
+    if (_looksLikeUrl(trimmed)) {
+      return Image.network(
+        trimmed,
+        fit: BoxFit.contain,
+        errorBuilder: (_, __, ___) => _previewFallback(),
+      );
+    }
+
+    if (_isInlineImageData(trimmed)) {
+      final bytes = _decodeInlineImage(trimmed);
+      if (bytes != null) {
+        return Image.memory(
+          bytes,
+          fit: BoxFit.contain,
+          errorBuilder: (_, __, ___) => _previewFallback(),
+        );
+      }
+    }
+
+    return _previewFallback();
+  }
+
+  dynamic _decodeInlineImage(String value) {
+    try {
+      return UriData.parse(value).contentAsBytes();
+    } catch (_) {
+      return null;
+    }
+  }
+
   Widget _photoFallback(String label) {
     return Container(
       width: 72,
@@ -523,6 +723,14 @@ class _PhaseCardState extends State<_PhaseCard> {
       color: const Color(0xFFE7EAF2),
       alignment: Alignment.center,
       child: const Icon(Icons.image_outlined, color: Color(0xFF5B6378)),
+    );
+  }
+
+  Widget _previewFallback() {
+    return Container(
+      color: const Color(0xFF111111),
+      alignment: Alignment.center,
+      child: const Icon(Icons.broken_image_outlined, color: Colors.white70, size: 48),
     );
   }
 }

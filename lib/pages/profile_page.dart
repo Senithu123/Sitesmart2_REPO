@@ -367,20 +367,6 @@ class _ProfilePageState extends State<ProfilePage> {
                   ),
                 ),
                 const SizedBox(height: 16),
-                _SectionCard(
-                  title: 'Role Specific Details',
-                  child: Column(
-                    children: [
-                      for (int i = 0; i < profile.detailItems.length; i++)
-                        _InfoRow(
-                          label: profile.detailItems[i].label,
-                          value: profile.detailItems[i].value,
-                          isLast: i == profile.detailItems.length - 1,
-                        ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 16),
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton.icon(

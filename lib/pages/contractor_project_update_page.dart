@@ -1,7 +1,11 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -72,6 +76,24 @@ class _ContractorProjectUpdatePageState extends State<ContractorProjectUpdatePag
         {'name': 'Install slab shuttering', 'done': false},
         {'name': 'Pour slab concrete', 'done': false},
         {'name': 'Cure slab', 'done': false},
+      ],
+      'imageUrls': [],
+      'status': 'Not Started',
+    },
+    {
+      'id': 'finishing_work',
+      'order': 4,
+      'title': 'Finishing Work',
+      'dateRange': 'Jan 1 - Jan 20',
+      'percentage': 0,
+      'tasksCompleted': 0,
+      'totalTasks': 4,
+      'imageCount': 0,
+      'tasks': [
+        {'name': 'Install doors and windows', 'done': false},
+        {'name': 'Complete interior plastering', 'done': false},
+        {'name': 'Apply paint and surface finishes', 'done': false},
+        {'name': 'Final quality inspection', 'done': false},
       ],
       'imageUrls': [],
       'status': 'Not Started',
@@ -149,18 +171,25 @@ class _ContractorProjectUpdatePageState extends State<ContractorProjectUpdatePag
       final timelineRef =
           FirebaseFirestore.instance.collection('projects').doc(widget.projectId).collection('timeline');
 
-      final existing = await timelineRef.limit(1).get();
-      if (existing.docs.isNotEmpty) return;
+      final existing = await timelineRef.get();
+      final existingIds = existing.docs.map((doc) => doc.id).toSet();
 
       final batch = FirebaseFirestore.instance.batch();
+      var addedAny = false;
       for (final phase in _defaultPhases) {
         final id = phase['id'].toString();
+        if (existingIds.contains(id)) {
+          continue;
+        }
         batch.set(timelineRef.doc(id), {
           ...phase,
           'updatedAt': FieldValue.serverTimestamp(),
           'updatedBy': FirebaseAuth.instance.currentUser?.uid,
         });
+        addedAny = true;
       }
+      if (!addedAny) return;
+
       batch.set(
         FirebaseFirestore.instance.collection('projects').doc(widget.projectId),
         {
@@ -223,6 +252,28 @@ class _ContractorProjectUpdatePageState extends State<ContractorProjectUpdatePag
     }
   }
 
+  List<Map<String, dynamic>> _mergePhasesWithDefaults(
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+  ) {
+    final merged = <String, Map<String, dynamic>>{
+      for (final phase in _defaultPhases) phase['id'].toString(): Map<String, dynamic>.from(phase),
+    };
+
+    for (final doc in docs) {
+      merged[doc.id] = {
+        ...(merged[doc.id] ?? <String, dynamic>{}),
+        'id': doc.id,
+        ...doc.data(),
+      };
+    }
+
+    final phases = merged.values.toList();
+    phases.sort(
+      (a, b) => ((a['order'] ?? 999) as num).toInt().compareTo(((b['order'] ?? 999) as num).toInt()),
+    );
+    return phases;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -259,19 +310,18 @@ class _ContractorProjectUpdatePageState extends State<ContractorProjectUpdatePag
             return Center(child: Text('Firestore error: ${snapshot.error}'));
           }
 
-          final phases = snapshot.data?.docs ?? [];
-          if (phases.isEmpty) {
-            return const Center(child: Text('Timeline phases not initialized'));
-          }
+          final docs = snapshot.data?.docs ?? [];
+          final phases = _mergePhasesWithDefaults(docs);
 
           return ListView.separated(
             padding: const EdgeInsets.all(12),
             itemCount: phases.length,
             separatorBuilder: (_, __) => const SizedBox(height: 10),
             itemBuilder: (context, index) {
-              final doc = phases[index];
-              final data = doc.data();
+              final data = phases[index];
+              final phaseId = (data['id'] ?? '').toString().trim();
               return _PhaseEditorCard(
+                projectId: widget.projectId,
                 data: data,
                 onChanged: ({
                   int? percentage,
@@ -283,7 +333,7 @@ class _ContractorProjectUpdatePageState extends State<ContractorProjectUpdatePag
                   List<String>? imageUrls,
                 }) {
                   _updatePhase(
-                    doc.id,
+                    phaseId,
                     percentage: percentage,
                     tasksCompleted: tasksCompleted,
                     totalTasks: totalTasks,
@@ -303,6 +353,7 @@ class _ContractorProjectUpdatePageState extends State<ContractorProjectUpdatePag
 }
 
 class _PhaseEditorCard extends StatefulWidget {
+  final String projectId;
   final Map<String, dynamic> data;
   final void Function({
     int? percentage,
@@ -314,7 +365,11 @@ class _PhaseEditorCard extends StatefulWidget {
     List<String>? imageUrls,
   }) onChanged;
 
-  const _PhaseEditorCard({required this.data, required this.onChanged});
+  const _PhaseEditorCard({
+    required this.projectId,
+    required this.data,
+    required this.onChanged,
+  });
 
   @override
   State<_PhaseEditorCard> createState() => _PhaseEditorCardState();
@@ -328,6 +383,7 @@ class _PhaseEditorCardState extends State<_PhaseEditorCard> {
     'Done',
   ];
   late int _pendingPercentage;
+  late List<String> _localImageUrls;
   bool _showTasks = false;
   bool _showImages = false;
   final ImagePicker _picker = ImagePicker();
@@ -338,6 +394,7 @@ class _PhaseEditorCardState extends State<_PhaseEditorCard> {
     _pendingPercentage = ((widget.data['percentage'] ?? 0) as num)
         .toInt()
         .clamp(0, 100);
+    _localImageUrls = _readImageUrls(widget.data);
   }
 
   @override
@@ -346,6 +403,11 @@ class _PhaseEditorCardState extends State<_PhaseEditorCard> {
     final latest = ((widget.data['percentage'] ?? 0) as num).toInt().clamp(0, 100);
     if (latest != _pendingPercentage) {
       _pendingPercentage = latest;
+    }
+    final latestImages = _readImageUrls(widget.data);
+    if (latestImages.length != _localImageUrls.length ||
+        !_sameStringList(latestImages, _localImageUrls)) {
+      _localImageUrls = latestImages;
     }
   }
 
@@ -358,7 +420,7 @@ class _PhaseEditorCardState extends State<_PhaseEditorCard> {
     final tasks = _readTasks(data);
     final tasksCompleted = tasks.where((t) => (t['done'] ?? false) == true).length;
     final totalTasks = tasks.length;
-    final imageUrls = _readImageUrls(data);
+    final imageUrls = _localImageUrls;
     final imageCount = imageUrls.length;
     final rawStatus = (data['status'] ?? 'Not Started').toString();
     final status = _statusOptions.contains(rawStatus) ? rawStatus : 'Not Started';
@@ -562,7 +624,10 @@ class _PhaseEditorCardState extends State<_PhaseEditorCard> {
                   padding: const EdgeInsets.only(bottom: 6),
                   child: Row(
                     children: [
-                      _buildImageThumb(entry.value),
+                      GestureDetector(
+                        onTap: _canPreviewImage(entry.value) ? () => _showImagePreview(entry.value) : null,
+                        child: _buildImageThumb(entry.value),
+                      ),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
@@ -729,16 +794,133 @@ class _PhaseEditorCardState extends State<_PhaseEditorCard> {
 
   Future<void> _pickAndAddImage(List<String> current, ImageSource source) async {
     try {
-      final picked = await _picker.pickImage(source: source, imageQuality: 85);
-      if (picked == null) return;
-      final updated = List<String>.from(current)..add(picked.path);
-      _saveImages(updated);
-      if (mounted) setState(() => _showImages = true);
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not pick image from device')),
+      final picked = await _picker.pickImage(
+        source: source,
+        imageQuality: 45,
+        maxWidth: 960,
+        maxHeight: 960,
       );
+      if (picked == null) return;
+      String? imageValue;
+      String successMessage = 'Image saved successfully';
+
+      try {
+        imageValue = await _inlineImageDataUrl(picked);
+        successMessage = 'Image saved in app fallback mode';
+      } catch (_) {
+        imageValue = await _uploadPickedImage(picked);
+        successMessage = 'Image uploaded successfully';
+      }
+
+      if (imageValue == null || imageValue.isEmpty) return;
+      final updated = List<String>.from(current)..add(imageValue);
+      _saveImages(updated);
+      if (mounted) {
+        setState(() => _showImages = true);
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(content: Text(successMessage)),
+          );
+      }
+    } on FirebaseException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(content: Text(_describeUploadError(error))),
+        );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(content: Text('Could not upload image: $error')),
+        );
+    }
+  }
+
+  Future<String?> _uploadPickedImage(XFile picked) async {
+    final phaseId = (widget.data['id'] ?? 'phase').toString().trim();
+    final normalizedPhaseId = phaseId.isEmpty ? 'phase' : phaseId;
+    final extension = _fileExtension(picked.name);
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    final ref = FirebaseStorage.instance.ref().child(
+      'projects/${widget.projectId}/timeline/$normalizedPhaseId/$timestamp$extension',
+    );
+    final metadata = SettableMetadata(
+      contentType: _contentTypeForExtension(extension),
+    );
+
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('Uploading image...')),
+        );
+    }
+
+    if (kIsWeb) {
+      final bytes = await picked.readAsBytes();
+      await ref.putData(bytes, metadata);
+    } else {
+      await ref.putFile(File(picked.path), metadata);
+    }
+
+    return ref.getDownloadURL();
+  }
+
+  Future<String?> _inlineImageDataUrl(XFile picked) async {
+    final bytes = await picked.readAsBytes();
+    if (bytes.length > 350000) {
+      throw Exception(
+        'Image is too large for fallback upload. Please choose a smaller image or enable Firebase Storage.',
+      );
+    }
+
+    final extension = _fileExtension(picked.name);
+    final contentType = _contentTypeForExtension(extension);
+    final encoded = base64Encode(bytes);
+    return 'data:$contentType;base64,$encoded';
+  }
+
+  String _describeUploadError(FirebaseException error) {
+    final code = error.code.trim();
+    final message = error.message?.trim() ?? '';
+    if (code == 'permission-denied' || code == 'unauthorized') {
+      return 'Upload blocked by Firebase Storage rules. Deploy storage.rules, then try again.';
+    }
+    if (code == 'object-not-found' || code == 'bucket-not-found') {
+      return 'Firebase Storage bucket is not ready for this project yet.';
+    }
+    if (code == 'no-app') {
+      return 'Firebase Storage is not initialized for this app.';
+    }
+    if (message.isNotEmpty) {
+      return 'Image upload failed: $message';
+    }
+    return code.isEmpty ? 'Image upload failed' : 'Image upload failed: $code';
+  }
+
+  String _fileExtension(String name) {
+    final trimmed = name.trim();
+    final dotIndex = trimmed.lastIndexOf('.');
+    if (dotIndex < 0 || dotIndex == trimmed.length - 1) {
+      return '.jpg';
+    }
+    return trimmed.substring(dotIndex).toLowerCase();
+  }
+
+  String _contentTypeForExtension(String extension) {
+    switch (extension) {
+      case '.png':
+        return 'image/png';
+      case '.webp':
+        return 'image/webp';
+      case '.gif':
+        return 'image/gif';
+      default:
+        return 'image/jpeg';
     }
   }
 
@@ -778,15 +960,95 @@ class _PhaseEditorCardState extends State<_PhaseEditorCard> {
   }
 
   void _saveImages(List<String> imageUrls) {
+    setState(() {
+      _localImageUrls = List<String>.from(imageUrls);
+      _showImages = true;
+    });
     widget.onChanged(
       imageUrls: imageUrls,
       imageCount: imageUrls.length,
     );
   }
 
+  bool _sameStringList(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
   bool _looksLikeUrl(String value) {
     final v = value.trim().toLowerCase();
     return v.startsWith('http://') || v.startsWith('https://');
+  }
+
+  bool _isInlineImageData(String value) {
+    return value.trim().toLowerCase().startsWith('data:image/');
+  }
+
+  bool _canPreviewImage(String value) {
+    final trimmed = value.trim();
+    return _looksLikeUrl(trimmed) || _isInlineImageData(trimmed);
+  }
+
+  void _showImagePreview(String value) {
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black87,
+      builder: (dialogContext) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.all(16),
+          child: Stack(
+            children: [
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: AspectRatio(
+                  aspectRatio: 1,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: InteractiveViewer(
+                      minScale: 0.8,
+                      maxScale: 4,
+                      child: _buildPreviewImage(value),
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 18,
+                right: 18,
+                child: Material(
+                  color: Colors.black54,
+                  shape: const CircleBorder(),
+                  child: IconButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(),
+                    icon: const Icon(Icons.close, color: Colors.white),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Uint8List? _decodeInlineImage(String value) {
+    final trimmed = value.trim();
+    final commaIndex = trimmed.indexOf(',');
+    if (commaIndex < 0 || commaIndex == trimmed.length - 1) return null;
+    try {
+      return base64Decode(trimmed.substring(commaIndex + 1));
+    } catch (_) {
+      return null;
+    }
   }
 
   Widget _buildImageThumb(String value) {
@@ -806,6 +1068,26 @@ class _PhaseEditorCardState extends State<_PhaseEditorCard> {
           ),
         ),
       );
+    }
+
+    if (_isInlineImageData(trimmed)) {
+      final bytes = _decodeInlineImage(trimmed);
+      if (bytes != null) {
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(6),
+          child: Image.memory(
+            bytes,
+            width: 44,
+            height: 44,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => const SizedBox(
+              width: 44,
+              height: 44,
+              child: Icon(Icons.broken_image_outlined),
+            ),
+          ),
+        );
+      }
     }
 
     final file = File(trimmed);
@@ -830,6 +1112,38 @@ class _PhaseEditorCardState extends State<_PhaseEditorCard> {
       width: 44,
       height: 44,
       child: Icon(Icons.image_outlined),
+    );
+  }
+
+  Widget _buildPreviewImage(String value) {
+    final trimmed = value.trim();
+    if (_looksLikeUrl(trimmed)) {
+      return Image.network(
+        trimmed,
+        fit: BoxFit.contain,
+        errorBuilder: (_, __, ___) => _previewFallback(),
+      );
+    }
+
+    if (_isInlineImageData(trimmed)) {
+      final bytes = _decodeInlineImage(trimmed);
+      if (bytes != null) {
+        return Image.memory(
+          bytes,
+          fit: BoxFit.contain,
+          errorBuilder: (_, __, ___) => _previewFallback(),
+        );
+      }
+    }
+
+    return _previewFallback();
+  }
+
+  Widget _previewFallback() {
+    return Container(
+      color: const Color(0xFF111111),
+      alignment: Alignment.center,
+      child: const Icon(Icons.broken_image_outlined, color: Colors.white70, size: 48),
     );
   }
 }

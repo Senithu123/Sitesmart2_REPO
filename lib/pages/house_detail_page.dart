@@ -11,6 +11,7 @@ import '../services/vr_payment_service.dart';
 import 'vr_view.dart';
 
 class HouseDetailPage extends StatefulWidget {
+  final String houseId;
   final String imagePath;
   final String imageUrl;
   final List<String> galleryPaths;
@@ -27,6 +28,7 @@ class HouseDetailPage extends StatefulWidget {
 
   const HouseDetailPage({
     super.key,
+    required this.houseId,
     required this.imagePath,
     this.imageUrl = '',
     this.galleryPaths = const [],
@@ -665,6 +667,7 @@ class _HouseDetailPageState extends State<HouseDetailPage> {
                                 context,
                                 MaterialPageRoute(
                                   builder: (context) => BookingFormPage(
+                                    houseId: widget.houseId,
                                     houseTitle: widget.houseName,
                                     priceText: widget.priceText,
                                   ),

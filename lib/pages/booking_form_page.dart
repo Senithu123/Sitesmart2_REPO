@@ -5,11 +5,13 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'booking_confirmation_page.dart';
 
 class BookingFormPage extends StatefulWidget {
+  final String houseId;
   final String houseTitle;
   final String priceText;
 
   const BookingFormPage({
     super.key,
+    required this.houseId,
     required this.houseTitle,
     required this.priceText,
   });
@@ -206,6 +208,7 @@ class _BookingFormPageState extends State<BookingFormPage> {
         "userId": user.uid,
         "userEmail": userEmail,
         "customerName": nameCtrl.text.trim(),
+        "houseId": widget.houseId,
         "phone": phoneCtrl.text.trim(),
         "houseTitle": widget.houseTitle,
         "priceText": widget.priceText,

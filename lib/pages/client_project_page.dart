@@ -213,10 +213,23 @@ class _ClientProjectPageState extends State<ClientProjectPage> {
       final meetingDate =
           _parseAnyDate(approvedData['appointmentDate']) ??
           _parseAnyDate(latest['appointmentDate']);
+      final projectData = projectDoc.data() ?? <String, dynamic>{};
+      final resolvedHouseId = (projectData['houseId'] ??
+              approvedData['houseId'] ??
+              latest['houseId'])
+          .toString()
+          .trim();
       final resolvedTitle =
-          (approvedData['houseTitle'] ?? latest['houseTitle']).toString().trim();
-      final resolvedListing = await _resolveHouseListing(title: resolvedTitle);
-      final resolvedLocation = (projectDoc.data()?['location'] ??
+          (projectData['houseTitle'] ??
+                  approvedData['houseTitle'] ??
+                  latest['houseTitle'])
+              .toString()
+              .trim();
+      final resolvedListing = await _resolveHouseListing(
+        houseId: resolvedHouseId,
+        title: resolvedTitle,
+      );
+      final resolvedLocation = (projectData['location'] ??
               approvedData['location'] ??
               latest['location'] ??
               resolvedListing?.location ??
@@ -231,7 +244,9 @@ class _ClientProjectPageState extends State<ClientProjectPage> {
         }
 
         final status =
-            (approvedData['status'] ?? latest['status']).toString().trim();
+            (projectData['status'] ?? approvedData['status'] ?? latest['status'])
+                .toString()
+                .trim();
         if (status.isNotEmpty) {
           _projectStatus = status;
         }
@@ -247,10 +262,12 @@ class _ClientProjectPageState extends State<ClientProjectPage> {
   }
 
   Future<HouseListing?> _resolveHouseListing({
+    String? houseId,
     required String title,
   }) async {
+    final normalizedHouseId = houseId?.trim() ?? '';
     final normalizedTitle = title.trim().toLowerCase();
-    if (normalizedTitle.isEmpty) return null;
+    if (normalizedHouseId.isEmpty && normalizedTitle.isEmpty) return null;
 
     HouseListing? defaultFallbackForTitle() {
       if (normalizedTitle.contains('lakeside') || normalizedTitle.contains('retreat')) {
@@ -282,6 +299,28 @@ class _ClientProjectPageState extends State<ClientProjectPage> {
       return normalizedCandidate == normalizedTitle ||
           normalizedCandidate.contains(normalizedTitle) ||
           normalizedTitle.contains(normalizedCandidate);
+    }
+
+    if (normalizedHouseId.isNotEmpty) {
+      try {
+        final doc = await FirebaseFirestore.instance
+            .collection('houses')
+            .doc(normalizedHouseId)
+            .get();
+        if (doc.exists) {
+          return HouseListing.fromMap(doc.id, doc.data()!);
+        }
+      } catch (_) {}
+
+      for (final listing in defaultHouseListings) {
+        if (listing.id == normalizedHouseId) {
+          return listing;
+        }
+      }
+    }
+
+    if (normalizedTitle.isEmpty) {
+      return null;
     }
 
     try {
