@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'admin_reports_page.dart';
 import 'profile_page.dart';
 import 'login_page.dart';
 
@@ -588,33 +589,10 @@ class _AdminPageState extends State<AdminPage> {
                 final bookingDocs = bookingsSnapshot.data?.docs ?? [];
                 final projectDocs = projectsSnapshot.data?.docs ?? [];
 
-                return FutureBuilder<_AdminOverviewData>(
-                  future: _loadAdminOverviewData(
-                    userDocs: userDocs,
-                    bookingDocs: bookingDocs,
-                    projectDocs: projectDocs,
-                  ),
-                  builder: (context, snapshot) {
-                    if (snapshot.connectionState == ConnectionState.waiting) {
-                      return const Center(child: CircularProgressIndicator());
-                    }
-                    if (snapshot.hasError) {
-                      return Center(
-                        child: Text(
-                          'Unable to load the admin overview right now\n${snapshot.error}',
-                          textAlign: TextAlign.center,
-                        ),
-                      );
-                    }
-
-                    final overview = snapshot.data!;
-                    return _buildAdminOverviewContent(
-                      userDocs: userDocs,
-                      bookingDocs: bookingDocs,
-                      projectDocs: projectDocs,
-                      overview: overview,
-                    );
-                  },
+                return _buildAdminOverviewContent(
+                  userDocs: userDocs,
+                  bookingDocs: bookingDocs,
+                  projectDocs: projectDocs,
                 );
               },
             );
@@ -930,7 +908,7 @@ class _AdminPageState extends State<AdminPage> {
         },
       );
     } else if (selectedIndex == 3) {
-      content = _buildAdminReportsPage();
+      content = const AdminReportsPage();
     } else {
       content = const SizedBox.shrink();
     }
@@ -1181,7 +1159,6 @@ class _AdminPageState extends State<AdminPage> {
     required List<QueryDocumentSnapshot<Map<String, dynamic>>> userDocs,
     required List<QueryDocumentSnapshot<Map<String, dynamic>>> bookingDocs,
     required List<QueryDocumentSnapshot<Map<String, dynamic>>> projectDocs,
-    required _AdminOverviewData overview,
   }) {
     final pendingBookings = bookingDocs.where((doc) => doc.data()['accessGranted'] != true).length;
     final approvedBookings = bookingDocs.length - pendingBookings;
