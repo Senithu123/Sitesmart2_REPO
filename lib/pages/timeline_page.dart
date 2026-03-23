@@ -17,7 +17,7 @@ class TimelinePage extends StatefulWidget {
   @override
   State<TimelinePage> createState() => _TimelinePageState();
 }
-
+// Created timeline UI for project progress tracking
 class _TimelinePageState extends State<TimelinePage> {
   String? _projectId;
   String _projectName = '';
