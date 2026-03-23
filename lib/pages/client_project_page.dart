@@ -23,6 +23,7 @@ class ClientProjectPage extends StatefulWidget {
   @override
   State<ClientProjectPage> createState() => _ClientProjectPageState();
 }
+// Implemented project details view UI and data display
 
 class _ClientProjectPageState extends State<ClientProjectPage> {
   int _selectedIndex = 0;
